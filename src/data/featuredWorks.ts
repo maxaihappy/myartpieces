@@ -1,0 +1,158 @@
+import obsidianMonolithImg from '../assets/images/art_obsidian_monolith_1794682086644.jpg';
+import nocturneBotanicalImg from '../assets/images/art_nocturne_botanical_1794682086806.jpg';
+import kineticLightImg from '../assets/images/art_kinetic_light_1794682088171.jpg';
+import lunarTopographyImg from '../assets/images/art_lunar_topography_1794682088080.jpg';
+import amberHorizonImg from '../assets/images/art_amber_horizon_1794682087920.jpg';
+import type { Album, Artwork } from '../types/gallery';
+
+const showcaseDate = new Date('2026-11-01T12:00:00Z');
+
+export const FEATURED_HERO_IMAGE = kineticLightImg;
+
+export const FEATURED_ALBUMS: Album[] = [
+  {
+    id: 'featured-monolith-light',
+    title: 'Architectural Stillness & Light',
+    description:
+      'Monumental spatial installations, obsidian stone monoliths, and luminous geometric interventions photographed in quiet museum halls.',
+    coverUrl: kineticLightImg,
+    ownerId: 'curator_archive_01',
+    ownerName: 'Elena Vance',
+    ownerPhotoUrl: '',
+    visibility: 'public',
+    artCount: 2,
+    artworkIds: ['featured-art-01', 'featured-art-03'],
+    createdAt: showcaseDate,
+    updatedAt: showcaseDate,
+    isFeaturedShowcase: true,
+  },
+  {
+    id: 'featured-tactile-nocturnes',
+    title: 'Tactile Nocturnes & Reliefs',
+    description:
+      'Chiaroscuro oil studies on raw linen, impasto plaster reliefs, and atmospheric medium-format horizons exploring shadow and gilt texture.',
+    coverUrl: nocturneBotanicalImg,
+    ownerId: 'curator_archive_02',
+    ownerName: 'Julian Mercer',
+    ownerPhotoUrl: '',
+    visibility: 'public',
+    artCount: 3,
+    artworkIds: ['featured-art-02', 'featured-art-04', 'featured-art-05'],
+    createdAt: showcaseDate,
+    updatedAt: showcaseDate,
+    isFeaturedShowcase: true,
+  },
+];
+
+export const FEATURED_ARTWORKS: Artwork[] = [
+  {
+    id: 'featured-art-01',
+    albumId: 'featured-monolith-light',
+    ownerId: 'curator_archive_01',
+    ownerName: 'Elena Vance',
+    ownerPhotoUrl: '',
+    title: 'Obsidian & Brushed Bronze Monolith IV',
+    description:
+      'A study in raw volcanic density intersected by precision-milled bronze planes under vertical gallery spotlighting.',
+    medium: 'Sculpture & Relief',
+    dimensions: '3200 × 2400 px',
+    year: '2026',
+    tags: ['monolith', 'obsidian', 'bronze', 'installation'],
+    imageUrl: obsidianMonolithImg,
+    aspectRatio: '4:3',
+    visibility: 'public',
+    likesCount: 48,
+    commentsCount: 6,
+    createdAt: showcaseDate,
+    updatedAt: showcaseDate,
+    isFeaturedShowcase: true,
+  },
+  {
+    id: 'featured-art-02',
+    albumId: 'featured-tactile-nocturnes',
+    ownerId: 'curator_archive_02',
+    ownerName: 'Julian Mercer',
+    ownerPhotoUrl: '',
+    title: 'Nocturne Iris in Gold Leaf',
+    description:
+      'Deep indigo botanical study painted with layered oil glazes and fine gold-veined foliage on unprimed Belgian linen.',
+    medium: 'Oil & Linen',
+    dimensions: '2400 × 3200 px',
+    year: '2026',
+    tags: ['botanical', 'chiaroscuro', 'oil', 'linen'],
+    imageUrl: nocturneBotanicalImg,
+    aspectRatio: '3:4',
+    visibility: 'public',
+    likesCount: 64,
+    commentsCount: 9,
+    createdAt: showcaseDate,
+    updatedAt: showcaseDate,
+    isFeaturedShowcase: true,
+  },
+  {
+    id: 'featured-art-03',
+    albumId: 'featured-monolith-light',
+    ownerId: 'curator_archive_01',
+    ownerName: 'Elena Vance',
+    ownerPhotoUrl: '',
+    title: 'Amber Refraction Chamber',
+    description:
+      'Intersecting planes of projected warm amber and alabaster light suspended across a vaulted brutalist concrete room.',
+    medium: 'Light Installation',
+    dimensions: '3840 × 2160 px',
+    year: '2026',
+    tags: ['light', 'architecture', 'minimalism', 'space'],
+    imageUrl: kineticLightImg,
+    aspectRatio: '16:9',
+    visibility: 'public',
+    likesCount: 92,
+    commentsCount: 11,
+    createdAt: showcaseDate,
+    updatedAt: showcaseDate,
+    isFeaturedShowcase: true,
+  },
+  {
+    id: 'featured-art-04',
+    albumId: 'featured-tactile-nocturnes',
+    ownerId: 'curator_archive_02',
+    ownerName: 'Julian Mercer',
+    ownerPhotoUrl: '',
+    title: 'Lunar Topography Study No. 7',
+    description:
+      'Hand-carved matte charcoal plaster ridges burnished with silver leaf along the crest lines to catch raking studio light.',
+    medium: 'Sculpture & Relief',
+    dimensions: '2800 × 2800 px',
+    year: '2025',
+    tags: ['impasto', 'plaster', 'silver-leaf', 'abstract'],
+    imageUrl: lunarTopographyImg,
+    aspectRatio: '1:1',
+    visibility: 'public',
+    likesCount: 41,
+    commentsCount: 4,
+    createdAt: showcaseDate,
+    updatedAt: showcaseDate,
+    isFeaturedShowcase: true,
+  },
+  {
+    id: 'featured-art-05',
+    albumId: 'featured-tactile-nocturnes',
+    ownerId: 'curator_archive_02',
+    ownerName: 'Julian Mercer',
+    ownerPhotoUrl: '',
+    title: 'Basalt Dunes at Amber Dusk',
+    description:
+      'Medium-format coastal study capturing volcanic black sand ridges dissolving into diffused golden-hour mist.',
+    medium: 'Fine Art Photography',
+    dimensions: '2700 × 3600 px',
+    year: '2026',
+    tags: ['landscape', 'monochrome', 'dusk', 'photography'],
+    imageUrl: amberHorizonImg,
+    aspectRatio: '3:4',
+    visibility: 'public',
+    likesCount: 73,
+    commentsCount: 7,
+    createdAt: showcaseDate,
+    updatedAt: showcaseDate,
+    isFeaturedShowcase: true,
+  },
+];

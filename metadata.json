@@ -1,0 +1,6 @@
+{
+  "name": "myartpieces",
+  "description": "Curated digital art gallery for cataloging, showcasing, and privately or publicly sharing high-resolution artworks.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

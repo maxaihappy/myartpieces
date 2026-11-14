@@ -1,0 +1,460 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 1. Global Safety Net (Default Deny)
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // 2. Reusable Hardened Primitives
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true && request.auth.token.email is string;
+    }
+
+    function userEmailLower() {
+      return request.auth.token.email.lower();
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidEmail(email) {
+      return email is string && email.size() >= 3 && email.size() <= 254 && email.matches('^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$');
+    }
+
+    function isValidString(val, minLen, maxLen) {
+      return val is string && val.size() >= minLen && val.size() <= maxLen;
+    }
+
+    function isValidVisibility(val) {
+      return val in ['public', 'unlisted', 'private', 'invite'];
+    }
+
+    function inviteDocPath(albumId, emailLower) {
+      return /databases/$(database)/documents/invites/$(albumId + '__' + emailLower);
+    }
+
+    function isAlbumOwner(albumId) {
+      return isSignedIn() && get(/databases/$(database)/documents/albums/$(albumId)).data.ownerId == request.auth.uid;
+    }
+
+    function isAlbumInvited(albumId) {
+      return isVerifiedUser() && exists(inviteDocPath(albumId, userEmailLower()));
+    }
+
+    function isAlbumEditor(albumId) {
+      return isAlbumInvited(albumId) && get(inviteDocPath(albumId, userEmailLower())).data.role == 'editor';
+    }
+
+    // 3. Entity Validation Blueprints
+    function isValidUserPublicProfile(data, userId) {
+      return data.keys().hasAll(['uid', 'displayName', 'photoURL', 'bio', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'displayName', 'photoURL', 'bio', 'createdAt', 'updatedAt'])
+        && data.uid == userId
+        && data.uid == request.auth.uid
+        && isValidId(data.uid)
+        && isValidString(data.displayName, 1, 100)
+        && isValidString(data.photoURL, 0, 1000)
+        && isValidString(data.bio, 0, 500)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidUserPrivateAccount(data, userId) {
+      return data.keys().hasAll(['uid', 'email', 'pushEnabled', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'email', 'pushEnabled', 'createdAt', 'updatedAt'])
+        && data.uid == userId
+        && data.uid == request.auth.uid
+        && isValidId(data.uid)
+        && isValidEmail(data.email)
+        && data.email.lower() == userEmailLower()
+        && data.pushEnabled is bool
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidAlbum(data, albumId) {
+      return data.keys().hasAll([
+          'id', 'title', 'description', 'coverUrl', 'ownerId', 'ownerName',
+          'ownerPhotoUrl', 'visibility', 'artCount', 'artworkIds', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'title', 'description', 'coverUrl', 'ownerId', 'ownerName',
+          'ownerPhotoUrl', 'visibility', 'artCount', 'artworkIds', 'createdAt', 'updatedAt'
+        ])
+        && data.id == albumId
+        && isValidId(data.id)
+        && isValidString(data.title, 1, 120)
+        && isValidString(data.description, 0, 1000)
+        && isValidString(data.coverUrl, 0, 1000)
+        && isValidId(data.ownerId)
+        && isValidString(data.ownerName, 1, 100)
+        && isValidString(data.ownerPhotoUrl, 0, 1000)
+        && isValidVisibility(data.visibility)
+        && data.artCount is int && data.artCount >= 0 && data.artCount <= 100
+        && data.artworkIds is list && data.artworkIds.size() <= 100
+        && (data.artworkIds.size() == 0 || isValidId(data.artworkIds[0]))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidAlbumInvite(data, inviteKey) {
+      return data.keys().hasAll([
+          'id', 'email', 'albumId', 'albumTitle', 'coverUrl', 'ownerId', 'ownerName',
+          'role', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'email', 'albumId', 'albumTitle', 'coverUrl', 'ownerId', 'ownerName',
+          'role', 'createdAt', 'updatedAt'
+        ])
+        && data.id == inviteKey
+        && isValidEmail(data.email)
+        && data.email == data.email.lower()
+        && isValidId(data.albumId)
+        && inviteKey == data.albumId + '__' + data.email
+        && isValidString(data.albumTitle, 1, 120)
+        && isValidString(data.coverUrl, 0, 1000)
+        && isValidId(data.ownerId)
+        && isValidString(data.ownerName, 1, 100)
+        && data.role in ['viewer', 'editor']
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidArtwork(data, artworkId) {
+      return data.keys().hasAll([
+          'id', 'albumId', 'ownerId', 'ownerName', 'ownerPhotoUrl', 'title',
+          'description', 'medium', 'dimensions', 'year', 'tags', 'imageUrl',
+          'aspectRatio', 'visibility', 'likesCount', 'commentsCount', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'albumId', 'ownerId', 'ownerName', 'ownerPhotoUrl', 'title',
+          'description', 'medium', 'dimensions', 'year', 'tags', 'imageUrl',
+          'aspectRatio', 'visibility', 'likesCount', 'commentsCount', 'createdAt', 'updatedAt'
+        ])
+        && data.id == artworkId
+        && isValidId(data.id)
+        && isValidId(data.albumId)
+        && isValidId(data.ownerId)
+        && isValidString(data.ownerName, 1, 100)
+        && isValidString(data.ownerPhotoUrl, 0, 1000)
+        && isValidString(data.title, 1, 160)
+        && isValidString(data.description, 0, 2000)
+        && isValidString(data.medium, 1, 80)
+        && isValidString(data.dimensions, 0, 60)
+        && isValidString(data.year, 0, 12)
+        && data.tags is list && data.tags.size() <= 10
+        && (data.tags.size() == 0 || isValidString(data.tags[0], 1, 40))
+        && isValidString(data.imageUrl, 1, 1000)
+        && data.aspectRatio in ['4:3', '3:4', '16:9', '1:1', 'auto']
+        && isValidVisibility(data.visibility)
+        && data.likesCount is int && data.likesCount >= 0
+        && data.commentsCount is int && data.commentsCount >= 0
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidLike(data, userId) {
+      return data.keys().hasAll(['userId', 'userName', 'createdAt'])
+        && data.keys().hasOnly(['userId', 'userName', 'createdAt'])
+        && data.userId == userId
+        && data.userId == request.auth.uid
+        && isValidId(data.userId)
+        && isValidString(data.userName, 1, 100)
+        && data.createdAt is timestamp;
+    }
+
+    function isValidComment(data, artworkId, commentId) {
+      return data.keys().hasAll([
+          'id', 'artworkId', 'authorId', 'authorName', 'authorPhotoUrl',
+          'text', 'visibility', 'artworkOwnerId', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'artworkId', 'authorId', 'authorName', 'authorPhotoUrl',
+          'text', 'visibility', 'artworkOwnerId', 'createdAt', 'updatedAt'
+        ])
+        && data.id == commentId
+        && isValidId(data.id)
+        && data.artworkId == artworkId
+        && isValidId(data.artworkId)
+        && data.authorId == request.auth.uid
+        && isValidId(data.authorId)
+        && isValidString(data.authorName, 1, 100)
+        && isValidString(data.authorPhotoUrl, 0, 1000)
+        && isValidString(data.text, 1, 1000)
+        && isValidVisibility(data.visibility)
+        && isValidId(data.artworkOwnerId)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidNotification(data, userId, notificationId) {
+      return data.keys().hasAll([
+          'id', 'recipientId', 'actorId', 'actorName', 'actorPhotoUrl',
+          'type', 'artworkId', 'artworkTitle', 'albumId', 'message',
+          'read', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'recipientId', 'actorId', 'actorName', 'actorPhotoUrl',
+          'type', 'artworkId', 'artworkTitle', 'albumId', 'message',
+          'read', 'createdAt', 'updatedAt'
+        ])
+        && data.id == notificationId
+        && isValidId(data.id)
+        && data.recipientId == userId
+        && isValidId(data.recipientId)
+        && data.actorId == request.auth.uid
+        && data.actorId != userId
+        && isValidId(data.actorId)
+        && isValidString(data.actorName, 1, 100)
+        && isValidString(data.actorPhotoUrl, 0, 1000)
+        && data.type in ['like', 'comment', 'invite']
+        && isValidString(data.artworkId, 0, 128)
+        && isValidString(data.artworkTitle, 0, 160)
+        && isValidString(data.albumId, 0, 128)
+        && isValidString(data.message, 1, 300)
+        && data.read == false
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    // 4. Collection Rules
+    match /users/{userId} {
+      allow get: if isValidId(userId);
+      allow create: if isVerifiedUser() && isValidId(userId) && userId == request.auth.uid
+        && isValidUserPublicProfile(incoming(), userId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isVerifiedUser() && isValidId(userId) && userId == request.auth.uid
+        && isValidUserPublicProfile(incoming(), userId)
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'photoURL', 'bio', 'updatedAt']);
+
+      match /private/{docId} {
+        allow get: if isSignedIn() && userId == request.auth.uid && docId == 'account';
+        allow create: if isVerifiedUser() && isValidId(userId) && userId == request.auth.uid && docId == 'account'
+          && isValidUserPrivateAccount(incoming(), userId)
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time;
+        allow update: if isVerifiedUser() && isValidId(userId) && userId == request.auth.uid && docId == 'account'
+          && isValidUserPrivateAccount(incoming(), userId)
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && incoming().diff(existing()).affectedKeys().hasOnly(['pushEnabled', 'updatedAt']);
+      }
+
+      match /notifications/{notificationId} {
+        allow get: if isSignedIn() && isValidId(notificationId) && userId == request.auth.uid;
+        allow list: if isSignedIn() && existing().recipientId == request.auth.uid;
+        allow create: if isVerifiedUser() && isValidId(userId) && isValidId(notificationId)
+          && isValidNotification(incoming(), userId, notificationId)
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time
+          && exists(/databases/$(database)/documents/artworks/$(incoming().artworkId));
+        allow update: if isVerifiedUser() && isValidId(notificationId) && userId == request.auth.uid
+          && incoming().recipientId == existing().recipientId
+          && incoming().actorId == existing().actorId
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && incoming().read is bool
+          && incoming().diff(existing()).affectedKeys().hasOnly(['read', 'updatedAt']);
+        allow delete: if isSignedIn() && isValidId(notificationId) && userId == request.auth.uid;
+      }
+    }
+
+    match /invites/{inviteKey} {
+      allow get: if isVerifiedUser() && isValidString(inviteKey, 5, 384)
+        && (existing().ownerId == request.auth.uid || existing().email == userEmailLower());
+      allow list: if isVerifiedUser()
+        && (existing().ownerId == request.auth.uid || existing().email == userEmailLower());
+      allow create: if isVerifiedUser() && isValidString(inviteKey, 5, 384)
+        && isValidAlbumInvite(incoming(), inviteKey)
+        && incoming().ownerId == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && isAlbumOwner(incoming().albumId);
+      allow update: if isVerifiedUser() && isValidString(inviteKey, 5, 384)
+        && isValidAlbumInvite(incoming(), inviteKey)
+        && existing().ownerId == request.auth.uid
+        && incoming().ownerId == existing().ownerId
+        && incoming().email == existing().email
+        && incoming().albumId == existing().albumId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly(['role', 'albumTitle', 'coverUrl', 'updatedAt']);
+      allow delete: if isVerifiedUser() && isValidString(inviteKey, 5, 384)
+        && (existing().ownerId == request.auth.uid || existing().email == userEmailLower());
+    }
+
+    match /albums/{albumId} {
+      allow get: if isValidId(albumId) && (
+        existing().visibility in ['public', 'unlisted']
+        || (isSignedIn() && existing().ownerId == request.auth.uid)
+        || isAlbumInvited(albumId)
+      );
+      allow list: if existing().visibility == 'public'
+        || (isSignedIn() && existing().ownerId == request.auth.uid);
+
+      allow create: if isVerifiedUser() && isValidId(albumId)
+        && isValidAlbum(incoming(), albumId)
+        && incoming().ownerId == request.auth.uid
+        && incoming().artCount == 0
+        && incoming().artworkIds.size() == 0
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+
+      allow update: if isVerifiedUser() && isValidId(albumId)
+        && isValidAlbum(incoming(), albumId)
+        && incoming().id == existing().id
+        && incoming().ownerId == existing().ownerId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          (existing().ownerId == request.auth.uid
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'title', 'description', 'coverUrl', 'visibility', 'artCount', 'artworkIds', 'updatedAt'
+            ]))
+          ||
+          (isAlbumEditor(albumId)
+            && incoming().visibility == existing().visibility
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'title', 'description', 'coverUrl', 'artCount', 'artworkIds', 'updatedAt'
+            ]))
+        );
+
+      allow delete: if isVerifiedUser() && isValidId(albumId) && existing().ownerId == request.auth.uid;
+    }
+
+    match /artworks/{artworkId} {
+      allow get: if isValidId(artworkId) && (
+        existing().visibility in ['public', 'unlisted']
+        || (isSignedIn() && existing().ownerId == request.auth.uid)
+        || isAlbumInvited(existing().albumId)
+      );
+      allow list: if existing().visibility == 'public'
+        || (isSignedIn() && existing().ownerId == request.auth.uid);
+
+      allow create: if isVerifiedUser() && isValidId(artworkId)
+        && isValidArtwork(incoming(), artworkId)
+        && incoming().ownerId == request.auth.uid
+        && incoming().likesCount == 0
+        && incoming().commentsCount == 0
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && exists(/databases/$(database)/documents/albums/$(incoming().albumId))
+        && (isAlbumOwner(incoming().albumId) || isAlbumEditor(incoming().albumId))
+        && incoming().visibility == get(/databases/$(database)/documents/albums/$(incoming().albumId)).data.visibility
+        && getAfter(/databases/$(database)/documents/albums/$(incoming().albumId)).data.artCount == get(/databases/$(database)/documents/albums/$(incoming().albumId)).data.artCount + 1;
+
+      allow update: if isVerifiedUser() && isValidId(artworkId)
+        && isValidArtwork(incoming(), artworkId)
+        && incoming().id == existing().id
+        && incoming().ownerId == existing().ownerId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          (existing().ownerId == request.auth.uid
+            && incoming().likesCount == existing().likesCount
+            && incoming().commentsCount == existing().commentsCount
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'title', 'description', 'medium', 'dimensions', 'year', 'tags', 'albumId', 'visibility', 'updatedAt'
+            ]))
+          ||
+          (isAlbumOwner(existing().albumId)
+            && incoming().likesCount == existing().likesCount
+            && incoming().commentsCount == existing().commentsCount
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'visibility', 'updatedAt'
+            ]))
+          ||
+          (isAlbumEditor(existing().albumId)
+            && incoming().likesCount == existing().likesCount
+            && incoming().commentsCount == existing().commentsCount
+            && incoming().visibility == existing().visibility
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'title', 'description', 'medium', 'dimensions', 'year', 'tags', 'updatedAt'
+            ]))
+          ||
+          ((existing().visibility in ['public', 'unlisted'] || existing().ownerId == request.auth.uid || isAlbumInvited(existing().albumId))
+            && incoming().diff(existing()).affectedKeys().hasOnly(['likesCount', 'updatedAt'])
+            && (
+              (incoming().likesCount == existing().likesCount + 1
+                && !exists(/databases/$(database)/documents/artworks/$(artworkId)/likes/$(request.auth.uid))
+                && existsAfter(/databases/$(database)/documents/artworks/$(artworkId)/likes/$(request.auth.uid)))
+              ||
+              (incoming().likesCount == existing().likesCount - 1
+                && exists(/databases/$(database)/documents/artworks/$(artworkId)/likes/$(request.auth.uid))
+                && !existsAfter(/databases/$(database)/documents/artworks/$(artworkId)/likes/$(request.auth.uid)))
+            ))
+          ||
+          ((existing().visibility in ['public', 'unlisted'] || existing().ownerId == request.auth.uid || isAlbumInvited(existing().albumId))
+            && incoming().diff(existing()).affectedKeys().hasOnly(['commentsCount', 'updatedAt'])
+            && (incoming().commentsCount == existing().commentsCount + 1 || incoming().commentsCount == existing().commentsCount - 1))
+        );
+
+      allow delete: if isVerifiedUser() && isValidId(artworkId)
+        && (existing().ownerId == request.auth.uid || isAlbumOwner(existing().albumId));
+
+      match /likes/{userId} {
+        allow get: if isValidId(artworkId) && isValidId(userId) && (
+          get(/databases/$(database)/documents/artworks/$(artworkId)).data.visibility in ['public', 'unlisted']
+          || (isSignedIn() && (userId == request.auth.uid || get(/databases/$(database)/documents/artworks/$(artworkId)).data.ownerId == request.auth.uid))
+        );
+        allow list: if isSignedIn() && existing().userId == request.auth.uid;
+        allow create: if isVerifiedUser() && isValidId(artworkId) && isValidId(userId)
+          && userId == request.auth.uid
+          && isValidLike(incoming(), userId)
+          && incoming().createdAt == request.time
+          && exists(/databases/$(database)/documents/artworks/$(artworkId))
+          && getAfter(/databases/$(database)/documents/artworks/$(artworkId)).data.likesCount == get(/databases/$(database)/documents/artworks/$(artworkId)).data.likesCount + 1;
+        allow delete: if isVerifiedUser() && isValidId(artworkId) && isValidId(userId)
+          && userId == request.auth.uid
+          && exists(/databases/$(database)/documents/artworks/$(artworkId))
+          && getAfter(/databases/$(database)/documents/artworks/$(artworkId)).data.likesCount == get(/databases/$(database)/documents/artworks/$(artworkId)).data.likesCount - 1;
+      }
+
+      match /comments/{commentId} {
+        allow get: if isValidId(artworkId) && isValidId(commentId) && (
+          existing().visibility in ['public', 'unlisted']
+          || (isSignedIn() && (existing().authorId == request.auth.uid || existing().artworkOwnerId == request.auth.uid))
+          || isAlbumInvited(get(/databases/$(database)/documents/artworks/$(artworkId)).data.albumId)
+        );
+        allow list: if existing().visibility in ['public', 'unlisted']
+          || (isSignedIn() && (existing().authorId == request.auth.uid || existing().artworkOwnerId == request.auth.uid))
+          || isAlbumInvited(get(/databases/$(database)/documents/artworks/$(artworkId)).data.albumId);
+        allow create: if isVerifiedUser() && isValidId(artworkId) && isValidId(commentId)
+          && isValidComment(incoming(), artworkId, commentId)
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time
+          && exists(/databases/$(database)/documents/artworks/$(artworkId))
+          && incoming().visibility == get(/databases/$(database)/documents/artworks/$(artworkId)).data.visibility
+          && incoming().artworkOwnerId == get(/databases/$(database)/documents/artworks/$(artworkId)).data.ownerId
+          && (
+            get(/databases/$(database)/documents/artworks/$(artworkId)).data.visibility in ['public', 'unlisted']
+            || get(/databases/$(database)/documents/artworks/$(artworkId)).data.ownerId == request.auth.uid
+            || isAlbumInvited(get(/databases/$(database)/documents/artworks/$(artworkId)).data.albumId)
+          )
+          && getAfter(/databases/$(database)/documents/artworks/$(artworkId)).data.commentsCount == get(/databases/$(database)/documents/artworks/$(artworkId)).data.commentsCount + 1;
+        allow delete: if isVerifiedUser() && isValidId(artworkId) && isValidId(commentId)
+          && (existing().authorId == request.auth.uid || existing().artworkOwnerId == request.auth.uid)
+          && exists(/databases/$(database)/documents/artworks/$(artworkId))
+          && getAfter(/databases/$(database)/documents/artworks/$(artworkId)).data.commentsCount == get(/databases/$(database)/documents/artworks/$(artworkId)).data.commentsCount - 1;
+      }
+    }
+  }
+}
