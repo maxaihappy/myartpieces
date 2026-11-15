@@ -1,11 +1,14 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
+  Check,
   Download,
   Edit3,
   Heart,
+  Loader2,
   Lock,
   MessageSquare,
   RotateCcw,
+  RotateCw,
   Send,
   Trash2,
   X,
@@ -22,6 +25,7 @@ import {
   downloadOriginalArtwork,
   formatRelativeDate,
   hasUserLikedArtwork,
+  rotateAndSaveArtwork,
   subscribeArtworkComments,
   toggleArtworkLike,
   updateArtworkPiece,
@@ -32,6 +36,7 @@ import { ProtectedArtworkImage } from './ProtectedArtworkImage';
 interface ArtworkLightboxProps {
   artwork: Artwork;
   canEditAsAlbumEditor?: boolean;
+  isAlbumOwner?: boolean;
   onClose: () => void;
   onOpenAlbum: (albumId: string) => void;
 }
@@ -39,6 +44,7 @@ interface ArtworkLightboxProps {
 export function ArtworkLightbox({
   artwork: initialArtwork,
   canEditAsAlbumEditor = false,
+  isAlbumOwner = false,
   onClose,
   onOpenAlbum,
 }: ArtworkLightboxProps) {
@@ -57,6 +63,10 @@ export function ArtworkLightbox({
   const isPanningRef = useRef(false);
   const dragStartRef = useRef({ x: 0, y: 0 });
 
+  // Owner rotation preview & save state
+  const [pendingRotation, setPendingRotation] = useState<0 | 90 | 180 | 270>(0);
+  const [savingRotation, setSavingRotation] = useState(false);
+
   // Inline edit state
   const [isEditing, setIsEditing] = useState(false);
   const [editTitle, setEditTitle] = useState(initialArtwork.title);
@@ -69,7 +79,8 @@ export function ArtworkLightbox({
 
   const isFeatured = Boolean(artwork.isFeaturedShowcase);
   const isOwner = Boolean(user && user.uid === artwork.ownerId && !isFeatured);
-  const canEdit = isOwner || (canEditAsAlbumEditor && !isFeatured);
+  const canEdit = isOwner || ((canEditAsAlbumEditor || isAlbumOwner) && !isFeatured);
+  const canDelete = !isFeatured && (isAlbumOwner || (isOwner && !canEditAsAlbumEditor));
 
   useEffect(() => {
     setArtwork(initialArtwork);
@@ -80,6 +91,7 @@ export function ArtworkLightbox({
     setEditTags(initialArtwork.tags.join(', '));
     setZoom(1);
     setPan({ x: 0, y: 0 });
+    setPendingRotation(0);
     setIsEditing(false);
     setConfirmDelete(false);
   }, [initialArtwork]);
@@ -250,6 +262,29 @@ export function ArtworkLightbox({
     }
   };
 
+  const handleSaveRotation = async () => {
+    if (!canEdit || pendingRotation === 0 || savingRotation) return;
+    setSavingRotation(true);
+    try {
+      const updated = await rotateAndSaveArtwork(artwork, pendingRotation);
+      const nextArtwork: Artwork = {
+        ...artwork,
+        imageUrl: updated.imageUrl,
+        dimensions: updated.dimensions,
+        aspectRatio: updated.aspectRatio,
+      };
+      setArtwork(nextArtwork);
+      setPendingRotation(0);
+      window.dispatchEvent(new CustomEvent('map:artwork-updated', { detail: nextArtwork }));
+      showToast('Saved rotated photo.');
+    } catch (err) {
+      console.error(err);
+      showToast(err instanceof Error ? err.message : 'Could not save rotated photo.');
+    } finally {
+      setSavingRotation(false);
+    }
+  };
+
   return (
     <div
       role="dialog"
@@ -275,7 +310,61 @@ export function ArtworkLightbox({
             )}
           </div>
 
-          <div className="flex items-center gap-1.5">
+          <div className="flex flex-wrap items-center gap-1.5">
+            {canEdit && (
+              <div className="flex items-center gap-1 rounded-lg border border-zinc-800 bg-[#0B0B0D]/90 p-1 text-xs">
+                <button
+                  type="button"
+                  onClick={() =>
+                    setPendingRotation((prev) => (((prev + 270) % 360) as 0 | 90 | 180 | 270))
+                  }
+                  disabled={savingRotation}
+                  title="Rotate 90° left"
+                  aria-label="Rotate 90° left"
+                  className="rounded px-2 py-1 text-zinc-300 transition-colors hover:bg-zinc-800 hover:text-[#E5B84B] disabled:opacity-40"
+                >
+                  <RotateCcw className="h-3.5 w-3.5" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    setPendingRotation((prev) => (((prev + 90) % 360) as 0 | 90 | 180 | 270))
+                  }
+                  disabled={savingRotation}
+                  title="Rotate 90° right"
+                  aria-label="Rotate 90° right"
+                  className="rounded px-2 py-1 text-zinc-300 transition-colors hover:bg-zinc-800 hover:text-[#E5B84B] disabled:opacity-40"
+                >
+                  <RotateCw className="h-3.5 w-3.5" />
+                </button>
+                {pendingRotation !== 0 && (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => setPendingRotation(0)}
+                      disabled={savingRotation}
+                      className="rounded px-2 py-1 text-[11px] text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100 disabled:opacity-40"
+                    >
+                      Reset
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleSaveRotation}
+                      disabled={savingRotation}
+                      className="inline-flex items-center gap-1 rounded bg-[#E5B84B] px-2.5 py-1 text-[11px] font-semibold text-[#050505] hover:bg-[#f0c761] disabled:opacity-60"
+                    >
+                      {savingRotation ? (
+                        <Loader2 className="h-3 w-3 animate-spin" />
+                      ) : (
+                        <Check className="h-3 w-3" />
+                      )}
+                      <span>{savingRotation ? 'Saving...' : 'Save Rotation'}</span>
+                    </button>
+                  </>
+                )}
+              </div>
+            )}
+
             <div className="flex items-center gap-1 rounded-lg border border-zinc-800 bg-[#0B0B0D]/90 p-1 text-xs">
               <button
                 type="button"
@@ -338,7 +427,9 @@ export function ArtworkLightbox({
             className="max-h-[82vh] max-w-full rounded-sm shadow-2xl"
             imgClassName="max-h-[82vh] max-w-full w-auto h-auto object-contain transition-transform duration-150 ease-out"
             style={{
-              transform: `translate3d(${pan.x}px, ${pan.y}px, 0) scale(${zoom})`,
+              transform: `translate3d(${pan.x}px, ${pan.y}px, 0) scale(${
+                zoom === 1 && (pendingRotation === 90 || pendingRotation === 270) ? 0.74 : zoom
+              }) rotate(${pendingRotation}deg)`,
             }}
           />
         </div>
@@ -529,7 +620,7 @@ export function ArtworkLightbox({
                     <span>Edit Details</span>
                   </button>
 
-                  {isOwner && !confirmDelete && (
+                  {canDelete && !confirmDelete && (
                     <button
                       type="button"
                       onClick={() => setConfirmDelete(true)}
@@ -540,7 +631,7 @@ export function ArtworkLightbox({
                     </button>
                   )}
 
-                  {isOwner && confirmDelete && (
+                  {canDelete && confirmDelete && (
                     <div className="flex items-center gap-2">
                       <button
                         type="button"

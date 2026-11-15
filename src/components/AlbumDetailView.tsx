@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowLeft, Check, Copy, Lock, Settings2, Trash2, Upload } from 'lucide-react';
 import { doc, onSnapshot } from 'firebase/firestore';
 import { FEATURED_ALBUMS, FEATURED_ARTWORKS } from '../data/featuredWorks';
@@ -11,7 +11,7 @@ import { ArtworkCard } from './ArtworkCard';
 interface AlbumDetailViewProps {
   albumId: string;
   onBack: () => void;
-  onSelectArtwork: (artwork: Artwork, canEditAsAlbumEditor: boolean) => void;
+  onSelectArtwork: (artwork: Artwork, canEditAsAlbumEditor: boolean, isAlbumOwner?: boolean) => void;
   onManageAlbum: (album: Album) => void;
   onUploadToAlbum: (albumId: string) => void;
 }
@@ -38,6 +38,8 @@ export function AlbumDetailView({
   const [copiedLink, setCopiedLink] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
 
+  const artworksCacheRef = useRef<Map<string, Artwork>>(new Map());
+
   const featuredAlbum = useMemo(
     () => FEATURED_ALBUMS.find((a) => a.id === albumId) || null,
     [albumId],
@@ -51,6 +53,7 @@ export function AlbumDetailView({
   useEffect(() => {
     setAccessError(null);
     setConfirmDelete(false);
+    artworksCacheRef.current.clear();
 
     if (featuredAlbum) {
       setAlbum(featuredAlbum);
@@ -60,9 +63,11 @@ export function AlbumDetailView({
     }
 
     setLoading(true);
+    let active = true;
     const unsub = onSnapshot(
       doc(db, 'albums', albumId),
       async (snap) => {
+        if (!active) return;
         if (!snap.exists()) {
           setAlbum(null);
           setArtworks([]);
@@ -73,16 +78,26 @@ export function AlbumDetailView({
         const loaded = snap.data() as Album;
         setAlbum(loaded);
         setAccessError(null);
+        const ids = loaded.artworkIds || [];
+        const missingIds = ids.filter((id) => !artworksCacheRef.current.has(id));
         try {
-          const items = await fetchArtworksByIds(loaded.artworkIds || []);
-          setArtworks(items);
+          if (missingIds.length > 0) {
+            const fetched = await fetchArtworksByIds(missingIds);
+            if (!active) return;
+            fetched.forEach((art) => artworksCacheRef.current.set(art.id, art));
+          }
+          const ordered = ids
+            .map((id) => artworksCacheRef.current.get(id))
+            .filter((item): item is Artwork => Boolean(item));
+          setArtworks(ordered);
         } catch (err) {
           console.error(err);
         } finally {
-          setLoading(false);
+          if (active) setLoading(false);
         }
       },
       () => {
+        if (!active) return;
         setAlbum(null);
         setArtworks([]);
         setAccessError(
@@ -94,8 +109,24 @@ export function AlbumDetailView({
       },
     );
 
-    return () => unsub();
+    return () => {
+      active = false;
+      unsub();
+    };
   }, [albumId, featuredAlbum, user]);
+
+  useEffect(() => {
+    const handleArtworkUpdated = (e: Event) => {
+      const updated = (e as CustomEvent<Artwork>).detail;
+      if (!updated || updated.albumId !== albumId) return;
+      artworksCacheRef.current.set(updated.id, updated);
+      setArtworks((prev) =>
+        prev.map((item) => (item.id === updated.id ? updated : item)),
+      );
+    };
+    window.addEventListener('map:artwork-updated', handleArtworkUpdated);
+    return () => window.removeEventListener('map:artwork-updated', handleArtworkUpdated);
+  }, [albumId]);
 
   const isOwner = Boolean(album && user && album.ownerId === user.uid && !album.isFeaturedShowcase);
   const isInvitedEditor = Boolean(inviteRecord?.role === 'editor' && !album?.isFeaturedShowcase);
@@ -196,7 +227,7 @@ export function AlbumDetailView({
               <>
                 <span aria-hidden="true">·</span>
                 <span className="text-zinc-200">
-                  Shared ({inviteRecord.role === 'editor' ? 'Can Edit' : 'Viewer'})
+                  Shared ({inviteRecord.role === 'editor' ? 'Can Manage Album' : 'View Only'})
                 </span>
               </>
             )}
@@ -301,7 +332,17 @@ export function AlbumDetailView({
             <ArtworkCard
               key={art.id}
               artwork={art}
-              onSelect={(selected) => onSelectArtwork(selected, isInvitedEditor)}
+              canRotate={Boolean(
+                (isOwner || isInvitedEditor || (user && user.uid === art.ownerId)) &&
+                  !art.isFeaturedShowcase,
+              )}
+              onArtworkUpdated={(updated) => {
+                artworksCacheRef.current.set(updated.id, updated);
+                setArtworks((prev) =>
+                  prev.map((item) => (item.id === updated.id ? updated : item)),
+                );
+              }}
+              onSelect={(selected) => onSelectArtwork(selected, isInvitedEditor, isOwner)}
             />
           ))}
         </div>

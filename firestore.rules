@@ -105,8 +105,8 @@ service cloud.firestore {
         && isValidString(data.ownerName, 1, 100)
         && isValidString(data.ownerPhotoUrl, 0, 1000)
         && isValidVisibility(data.visibility)
-        && data.artCount is int && data.artCount >= 0 && data.artCount <= 100
-        && data.artworkIds is list && data.artworkIds.size() <= 100
+        && data.artCount is int && data.artCount >= 0 && data.artCount <= 500
+        && data.artworkIds is list && data.artworkIds.size() <= 500
         && (data.artworkIds.size() == 0 || isValidId(data.artworkIds[0]))
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
@@ -412,8 +412,13 @@ service cloud.firestore {
         );
         allow create: if isVerifiedUser() && isValidId(mediaId) && isValidId(chunkId)
           && isValidMediaChunk(incoming(), chunkId)
-          && exists(/databases/$(database)/documents/media/$(mediaId))
-          && get(/databases/$(database)/documents/media/$(mediaId)).data.ownerId == request.auth.uid;
+          && (
+            (exists(/databases/$(database)/documents/media/$(mediaId))
+              && get(/databases/$(database)/documents/media/$(mediaId)).data.ownerId == request.auth.uid)
+            ||
+            (existsAfter(/databases/$(database)/documents/media/$(mediaId))
+              && getAfter(/databases/$(database)/documents/media/$(mediaId)).data.ownerId == request.auth.uid)
+          );
         allow delete: if isVerifiedUser() && isValidId(mediaId) && isValidId(chunkId)
           && (
             get(/databases/$(database)/documents/media/$(mediaId)).data.ownerId == request.auth.uid
@@ -454,7 +459,7 @@ service cloud.firestore {
             && incoming().likesCount == existing().likesCount
             && incoming().commentsCount == existing().commentsCount
             && incoming().diff(existing()).affectedKeys().hasOnly([
-              'title', 'description', 'medium', 'dimensions', 'year', 'tags', 'albumId', 'visibility', 'updatedAt'
+              'title', 'description', 'medium', 'dimensions', 'year', 'tags', 'albumId', 'visibility', 'imageUrl', 'aspectRatio', 'updatedAt'
             ]))
           ||
           (isAlbumOwner(existing().albumId)
@@ -469,7 +474,7 @@ service cloud.firestore {
             && incoming().commentsCount == existing().commentsCount
             && incoming().visibility == existing().visibility
             && incoming().diff(existing()).affectedKeys().hasOnly([
-              'title', 'description', 'medium', 'dimensions', 'year', 'tags', 'updatedAt'
+              'title', 'description', 'medium', 'dimensions', 'year', 'tags', 'imageUrl', 'aspectRatio', 'updatedAt'
             ]))
           ||
           ((existing().visibility in ['public', 'unlisted'] || existing().ownerId == request.auth.uid || isAlbumInvited(existing().albumId))
@@ -490,7 +495,10 @@ service cloud.firestore {
         );
 
       allow delete: if isVerifiedUser() && isValidId(artworkId)
-        && (existing().ownerId == request.auth.uid || isAlbumOwner(existing().albumId));
+        && (
+          isAlbumOwner(existing().albumId)
+          || (existing().ownerId == request.auth.uid && !isAlbumInvited(existing().albumId))
+        );
 
       match /likes/{userId} {
         allow get: if isValidId(artworkId) && isValidId(userId) && (

@@ -23,7 +23,7 @@ export const FIELD_LIMITS = {
   COMMENT_MAX: 1000,
   URL_MAX: 1000,
   EMAIL_MAX: 254,
-  ALBUM_MAX_ARTWORKS: 100,
+  ALBUM_MAX_ARTWORKS: 500,
 } as const;
 
 export interface UserPublicProfile {

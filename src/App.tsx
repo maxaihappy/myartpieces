@@ -47,6 +47,7 @@ function GalleryShell() {
   const [selectedArtwork, setSelectedArtwork] = useState<{
     artwork: Artwork;
     canEditAsAlbumEditor: boolean;
+    isAlbumOwner?: boolean;
   } | null>(null);
   const [albumModalState, setAlbumModalState] = useState<{
     open: boolean;
@@ -186,8 +187,8 @@ function GalleryShell() {
           <AlbumDetailView
             albumId={activeAlbumId}
             onBack={() => navigateToView('albums')}
-            onSelectArtwork={(artwork, canEditAsAlbumEditor) =>
-              setSelectedArtwork({ artwork, canEditAsAlbumEditor })
+            onSelectArtwork={(artwork, canEditAsAlbumEditor, isAlbumOwner) =>
+              setSelectedArtwork({ artwork, canEditAsAlbumEditor, isAlbumOwner })
             }
             onManageAlbum={(album) => setAlbumModalState({ open: true, album })}
             onUploadToAlbum={(albId) => handleOpenUpload(albId)}
@@ -214,6 +215,7 @@ function GalleryShell() {
         <ArtworkLightbox
           artwork={selectedArtwork.artwork}
           canEditAsAlbumEditor={selectedArtwork.canEditAsAlbumEditor}
+          isAlbumOwner={selectedArtwork.isAlbumOwner}
           onClose={() => setSelectedArtwork(null)}
           onOpenAlbum={openAlbumDetail}
         />

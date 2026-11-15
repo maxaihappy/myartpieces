@@ -1,9 +1,14 @@
+import { execFile } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 import dotenv from 'dotenv';
 import express from 'express';
+
+const execFileAsync = promisify(execFile);
 
 dotenv.config();
 
@@ -38,10 +43,60 @@ async function startServer() {
   const app = express();
   const port = Number(process.env.PORT) || 3000;
 
-  app.use(express.json({ limit: '30mb' }));
+  app.use(express.json({ limit: '40mb' }));
 
   app.get('/api/health', (_req, res) => {
     res.json({ status: 'ok' });
+  });
+
+  app.post('/api/media/convert-heic', async (req, res) => {
+    const tmpId = crypto.randomUUID().replace(/-/g, '');
+    const inPath = path.join(os.tmpdir(), `${tmpId}.heic`);
+    const outPath = path.join(os.tmpdir(), `${tmpId}.jpg`);
+
+    try {
+      const { base64 } = req.body as { base64?: string };
+      if (!base64 || typeof base64 !== 'string') {
+        res.status(400).json({ error: 'Missing HEIC base64 payload.' });
+        return;
+      }
+
+      const rawBase64 = base64.includes(',') ? base64.split(',').pop() || '' : base64;
+      const inputBuffer = Buffer.from(rawBase64, 'base64');
+      if (inputBuffer.length === 0 || inputBuffer.length > 25 * 1024 * 1024) {
+        res.status(413).json({ error: 'HEIC file must be under 25 MB.' });
+        return;
+      }
+
+      fs.writeFileSync(inPath, inputBuffer);
+      await execFileAsync('convert', [inPath, '-auto-orient', '-quality', '92', outPath], {
+        timeout: 30000,
+      });
+
+      if (!fs.existsSync(outPath)) {
+        res.status(500).json({ error: 'HEIC conversion produced no output.' });
+        return;
+      }
+
+      const outBuffer = fs.readFileSync(outPath);
+      res.json({
+        dataUrl: `data:image/jpeg;base64,${outBuffer.toString('base64')}`,
+      });
+    } catch (err) {
+      console.error('HEIC server conversion error:', err);
+      res.status(422).json({ error: 'Server could not decode this HEIC file.' });
+    } finally {
+      try {
+        if (fs.existsSync(inPath)) fs.unlinkSync(inPath);
+      } catch {
+        // ignore cleanup error
+      }
+      try {
+        if (fs.existsSync(outPath)) fs.unlinkSync(outPath);
+      } catch {
+        // ignore cleanup error
+      }
+    }
   });
 
   app.post('/api/media/upload', (req, res) => {

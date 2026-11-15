@@ -283,7 +283,12 @@ export function StudioView({
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
             {myArtworks.map((art) => (
-              <ArtworkCard key={art.id} artwork={art} onSelect={onSelectArtwork} />
+              <ArtworkCard
+                key={art.id}
+                artwork={art}
+                canRotate={!art.isFeaturedShowcase}
+                onSelect={onSelectArtwork}
+              />
             ))}
           </div>
         )}
@@ -357,7 +362,7 @@ export function SharedView({ onOpenAlbum }: { onOpenAlbum: (albumId: string) => 
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
           {sharedAlbums.map((alb) => {
             const invite = receivedInvites.find((i) => i.albumId === alb.id);
-            const roleLabel = invite?.role === 'editor' ? 'Can Edit & Curate' : 'Viewer';
+            const roleLabel = invite?.role === 'editor' ? 'Can Manage Album' : 'View Only';
             return (
               <AlbumCard
                 key={alb.id}

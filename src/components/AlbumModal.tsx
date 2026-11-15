@@ -142,12 +142,30 @@ export function AlbumModal({ existingAlbum, onClose, onSaved }: AlbumModalProps)
         role: inviteRole,
       });
       setInviteEmail('');
-      showToast(`Invited ${cleaned} (${inviteRole}).`);
+      const roleText = inviteRole === 'editor' ? 'Manage Album' : 'View Only';
+      showToast(`Invited ${cleaned} (${roleText}).`);
     } catch (err) {
       console.error(err);
       showToast('Failed to send invitation.');
     } finally {
       setInviting(false);
+    }
+  };
+
+  const handleChangeInviteRole = async (email: string, nextRole: InviteRole) => {
+    if (!existingAlbum || !isOwner) return;
+    try {
+      await inviteUserToAlbum({
+        album: existingAlbum,
+        email,
+        role: nextRole,
+      });
+      showToast(
+        `Updated ${email} to ${nextRole === 'editor' ? 'Manage Album' : 'View Only'}.`,
+      );
+    } catch (err) {
+      console.error(err);
+      showToast('Could not update permission level.');
     }
   };
 
@@ -290,35 +308,61 @@ export function AlbumModal({ existingAlbum, onClose, onSaved }: AlbumModalProps)
               <h3 className="text-xs font-medium uppercase tracking-wider text-zinc-400 mb-2">
                 Invite-Only Email Permissions
               </h3>
-              <form onSubmit={handleAddInvite} className="flex flex-col sm:flex-row gap-2">
-                <div className="relative flex-1">
-                  <Mail className="pointer-events-none absolute left-3 top-2.5 h-4 w-4 text-zinc-500" />
-                  <input
-                    type="email"
-                    required
-                    maxLength={FIELD_LIMITS.EMAIL_MAX}
-                    value={inviteEmail}
-                    onChange={(e) => setInviteEmail(e.target.value)}
-                    placeholder="collaborator@gmail.com"
-                    className="w-full rounded-lg border border-zinc-800 bg-[#050505] pl-9 pr-3 py-2 text-xs text-zinc-100 placeholder:text-zinc-600 focus:border-[#E5B84B] focus:outline-none"
-                  />
+              <form onSubmit={handleAddInvite} className="space-y-3">
+                <div className="flex flex-col sm:flex-row gap-2">
+                  <div className="relative flex-1">
+                    <Mail className="pointer-events-none absolute left-3 top-2.5 h-4 w-4 text-zinc-500" />
+                    <input
+                      type="email"
+                      required
+                      maxLength={FIELD_LIMITS.EMAIL_MAX}
+                      value={inviteEmail}
+                      onChange={(e) => setInviteEmail(e.target.value)}
+                      placeholder="collaborator@gmail.com"
+                      className="w-full rounded-lg border border-zinc-800 bg-[#050505] pl-9 pr-3 py-2 text-xs text-zinc-100 placeholder:text-zinc-600 focus:border-[#E5B84B] focus:outline-none"
+                    />
+                  </div>
+                  <button
+                    type="submit"
+                    disabled={inviting || !inviteEmail.trim()}
+                    className="inline-flex items-center justify-center gap-1.5 rounded-lg bg-zinc-100 px-4 py-2 text-xs font-medium text-[#050505] hover:bg-white disabled:opacity-50 whitespace-nowrap"
+                  >
+                    <UserPlus className="h-3.5 w-3.5" />
+                    <span>{inviting ? 'Inviting...' : 'Send Invite'}</span>
+                  </button>
                 </div>
-                <select
-                  value={inviteRole}
-                  onChange={(e) => setInviteRole(e.target.value as InviteRole)}
-                  className="rounded-lg border border-zinc-800 bg-[#050505] px-3 py-2 text-xs text-zinc-200 focus:border-[#E5B84B] focus:outline-none"
-                >
-                  <option value="viewer">Can View</option>
-                  <option value="editor">Can Edit & Curate</option>
-                </select>
-                <button
-                  type="submit"
-                  disabled={inviting || !inviteEmail.trim()}
-                  className="inline-flex items-center justify-center gap-1.5 rounded-lg bg-zinc-100 px-3.5 py-2 text-xs font-medium text-[#050505] hover:bg-white disabled:opacity-50 whitespace-nowrap"
-                >
-                  <UserPlus className="h-3.5 w-3.5" />
-                  <span>{inviting ? 'Inviting...' : 'Invite'}</span>
-                </button>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                  <button
+                    type="button"
+                    onClick={() => setInviteRole('viewer')}
+                    className={`rounded-xl border p-3 text-left transition-colors ${
+                      inviteRole === 'viewer'
+                        ? 'border-[#E5B84B] bg-[#E5B84B]/10'
+                        : 'border-zinc-800 bg-[#050505] hover:border-zinc-700'
+                    }`}
+                  >
+                    <div className="text-xs font-medium text-zinc-100">View Only</div>
+                    <div className="mt-1 text-[11px] leading-snug text-zinc-400">
+                      Can view high-res photos, appreciate, and comment. Cannot upload, rotate, edit, or delete.
+                    </div>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setInviteRole('editor')}
+                    className={`rounded-xl border p-3 text-left transition-colors ${
+                      inviteRole === 'editor'
+                        ? 'border-[#E5B84B] bg-[#E5B84B]/10'
+                        : 'border-zinc-800 bg-[#050505] hover:border-zinc-700'
+                    }`}
+                  >
+                    <div className="text-xs font-medium text-zinc-100">Manage Album</div>
+                    <div className="mt-1 text-[11px] leading-snug text-zinc-400">
+                      Can upload photos, rotate, and edit details. Cannot delete photos or delete the album.
+                    </div>
+                  </button>
+                </div>
               </form>
 
               {albumInvites.length > 0 && (
@@ -326,22 +370,32 @@ export function AlbumModal({ existingAlbum, onClose, onSaved }: AlbumModalProps)
                   {albumInvites.map((inv) => (
                     <li
                       key={inv.id}
-                      className="flex items-center justify-between gap-3 px-3.5 py-2.5 text-xs"
+                      className="flex flex-wrap items-center justify-between gap-3 px-3.5 py-2.5 text-xs"
                     >
-                      <div className="min-w-0">
+                      <div className="min-w-0 flex-1">
                         <span className="text-zinc-200 truncate block">{inv.email}</span>
-                        <span className="text-[11px] text-zinc-500">
-                          {inv.role === 'editor' ? 'Curator / Editor' : 'Viewer'}
-                        </span>
                       </div>
-                      <button
-                        type="button"
-                        onClick={() => handleRevoke(inv.id, inv.email)}
-                        className="inline-flex items-center gap-1 text-zinc-500 hover:text-rose-400"
-                      >
-                        <Trash2 className="h-3.5 w-3.5" />
-                        <span>Revoke</span>
-                      </button>
+                      <div className="flex items-center gap-2.5 shrink-0">
+                        <select
+                          aria-label={`Permission for ${inv.email}`}
+                          value={inv.role}
+                          onChange={(e) =>
+                            handleChangeInviteRole(inv.email, e.target.value as InviteRole)
+                          }
+                          className="rounded-lg border border-zinc-800 bg-[#0B0B0D] px-2.5 py-1 text-[11px] text-zinc-200 focus:border-[#E5B84B] focus:outline-none"
+                        >
+                          <option value="viewer">View Only</option>
+                          <option value="editor">Manage Album</option>
+                        </select>
+                        <button
+                          type="button"
+                          onClick={() => handleRevoke(inv.id, inv.email)}
+                          className="inline-flex items-center gap-1 text-zinc-500 hover:text-rose-400"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                          <span>Revoke</span>
+                        </button>
+                      </div>
                     </li>
                   ))}
                 </ul>

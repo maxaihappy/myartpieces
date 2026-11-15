@@ -130,7 +130,8 @@ export function UploadArtworkModal({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
   const queueRef = useRef<QueuedArtwork[]>([]);
-  const activeConversionsRef = useRef<Set<string>>(new Set());
+  const activeConversionsRef = useRef<Map<string, Promise<File>>>(new Map());
+  const isMountedRef = useRef(true);
 
   const [queue, setQueue] = useState<QueuedArtwork[]>([]);
   const [isDragActive, setIsDragActive] = useState(false);
@@ -156,39 +157,43 @@ export function UploadArtworkModal({
   }, [queue]);
 
   useEffect(() => {
+    isMountedRef.current = true;
     return () => {
+      isMountedRef.current = false;
       queueRef.current.forEach((item) => {
         if (item.previewUrl) URL.revokeObjectURL(item.previewUrl);
       });
     };
   }, []);
 
-  // Background HEIC/HEIF -> JPEG conversion worker
-  useEffect(() => {
-    const pendingConversions = queue.filter(
-      (item) => item.status === 'converting' && !activeConversionsRef.current.has(item.key),
-    );
-    if (pendingConversions.length === 0) return;
+  const ensureFileConverted = (item: QueuedArtwork): Promise<File> => {
+    if (!isHeicFile(item.file)) {
+      return Promise.resolve(item.file);
+    }
+    const existing = activeConversionsRef.current.get(item.key);
+    if (existing) return existing;
 
-    let cancelled = false;
-    (async () => {
-      for (const item of pendingConversions) {
-        if (cancelled) break;
-        if (activeConversionsRef.current.has(item.key)) continue;
-        activeConversionsRef.current.add(item.key);
-        try {
-          const convertedFile = await convertHeicToJpeg(item.file);
-          if (cancelled) break;
+    const promise = convertHeicToJpeg(item.file)
+      .then((convertedFile) => {
+        if (isMountedRef.current) {
           const previewUrl = URL.createObjectURL(convertedFile);
           setQueue((prev) =>
             prev.map((q) =>
               q.key === item.key
-                ? { ...q, file: convertedFile, previewUrl, status: 'queued' }
+                ? {
+                    ...q,
+                    file: convertedFile,
+                    previewUrl,
+                    status: q.status === 'converting' ? 'queued' : q.status,
+                  }
                 : q,
             ),
           );
-        } catch (err) {
-          if (cancelled) break;
+        }
+        return convertedFile;
+      })
+      .catch((err) => {
+        if (isMountedRef.current) {
           setQueue((prev) =>
             prev.map((q) =>
               q.key === item.key
@@ -201,15 +206,28 @@ export function UploadArtworkModal({
                 : q,
             ),
           );
-        } finally {
-          activeConversionsRef.current.delete(item.key);
         }
-      }
-    })();
+        throw err;
+      })
+      .finally(() => {
+        activeConversionsRef.current.delete(item.key);
+      });
 
-    return () => {
-      cancelled = true;
-    };
+    activeConversionsRef.current.set(item.key, promise);
+    return promise;
+  };
+
+  // Concurrent background HEIC/HEIF -> JPEG preview worker pool (concurrency = 3, never cancels on re-render)
+  useEffect(() => {
+    const pending = queue.filter(
+      (item) => item.status === 'converting' && !activeConversionsRef.current.has(item.key),
+    );
+    if (pending.length === 0) return;
+
+    const availableSlots = Math.max(0, 3 - activeConversionsRef.current.size);
+    pending.slice(0, availableSlots).forEach((item) => {
+      void ensureFileConverted(item).catch(() => {});
+    });
   }, [queue]);
 
   const addFilesToQueue = (rawFiles: File[], suggestedFolderName = '') => {
@@ -319,7 +337,7 @@ export function UploadArtworkModal({
   };
 
   const convertingCount = queue.filter((item) => item.status === 'converting').length;
-  const readyItems = queue.filter((item) => item.status === 'queued' || item.status === 'error');
+  const uploadableItems = queue.filter((item) => item.status !== 'done');
   const existingAlbum = availableAlbums.find((a) => a.id === selectedAlbumId);
   const remainingSlots =
     selectedAlbumId === '__new__'
@@ -328,9 +346,9 @@ export function UploadArtworkModal({
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!user || readyItems.length === 0 || convertingCount > 0 || uploading) return;
+    if (!user || uploadableItems.length === 0 || uploading) return;
 
-    if (readyItems.length > remainingSlots) {
+    if (uploadableItems.length > remainingSlots) {
       showToast(
         `This album can hold ${remainingSlots} more piece(s). Create a new album or trim the queue.`,
       );
@@ -338,7 +356,7 @@ export function UploadArtworkModal({
     }
 
     setUploading(true);
-    setProgress({ current: 0, total: readyItems.length });
+    setProgress({ current: 0, total: uploadableItems.length });
 
     try {
       let targetAlbum: Album | undefined = existingAlbum;
@@ -367,68 +385,103 @@ export function UploadArtworkModal({
         };
       }
 
+      const albumSnapshot = targetAlbum;
+      let completedCount = 0;
       let successCount = 0;
       let failureCount = 0;
+      let nextIndex = 0;
 
-      for (let idx = 0; idx < readyItems.length; idx++) {
-        const item = readyItems[idx];
-        setProgress({ current: idx + 1, total: readyItems.length });
-        setQueue((prev) =>
-          prev.map((q) =>
-            q.key === item.key ? { ...q, status: 'uploading', errorMsg: undefined } : q,
-          ),
-        );
+      // Serialize only the lightweight album/artwork metadata commit to keep artCount strictly atomic
+      let metadataCommitChain: Promise<void> = Promise.resolve();
+      const enqueueMetadataCommit = (fn: () => Promise<void>) => {
+        const next = metadataCommitChain.then(fn, fn);
+        metadataCommitChain = next.catch(() => {});
+        return next;
+      };
 
-        try {
-          const uploadReadyFile = isHeicFile(item.file)
-            ? await convertHeicToJpeg(item.file)
-            : item.file;
-          const uploaded = await uploadMediaFile(uploadReadyFile, targetAlbum, user.uid);
-          const artworkId = await createArtworkPiece({
-            album: targetAlbum,
-            owner: user,
-            title: item.title.trim() || cleanTitleFromFilename(item.file.name),
-            description,
-            medium,
-            dimensions: uploaded.dimensions,
-            year,
-            tags: tagsInput.split(','),
-            imageUrl: uploaded.imageUrl,
-            aspectRatio: uploaded.aspectRatio,
-          });
+      const workerCount = Math.min(4, uploadableItems.length);
+      const runWorker = async () => {
+        while (true) {
+          const idx = nextIndex;
+          nextIndex += 1;
+          if (idx >= uploadableItems.length) break;
 
-          targetAlbum = {
-            ...targetAlbum,
-            coverUrl: targetAlbum.coverUrl || uploaded.imageUrl,
-            artCount: targetAlbum.artCount + 1,
-            artworkIds: [...targetAlbum.artworkIds, artworkId],
-          };
+          const item = uploadableItems[idx];
+          if (isMountedRef.current) {
+            setQueue((prev) =>
+              prev.map((q) =>
+                q.key === item.key ? { ...q, status: 'uploading', errorMsg: undefined } : q,
+              ),
+            );
+          }
 
-          successCount += 1;
-          setQueue((prev) =>
-            prev.map((q) => (q.key === item.key ? { ...q, status: 'done' } : q)),
-          );
-        } catch (itemErr) {
-          failureCount += 1;
-          setQueue((prev) =>
-            prev.map((q) =>
-              q.key === item.key
-                ? {
-                    ...q,
-                    status: 'error',
-                    errorMsg:
-                      itemErr instanceof Error ? itemErr.message : 'Upload failed',
-                  }
-                : q,
-            ),
-          );
+          try {
+            const latestItem =
+              queueRef.current.find((q) => q.key === item.key) || item;
+            const uploadReadyFile = isHeicFile(latestItem.file)
+              ? await ensureFileConverted(latestItem)
+              : latestItem.file;
+
+            const uploaded = await uploadMediaFile(uploadReadyFile, albumSnapshot, user.uid);
+
+            await enqueueMetadataCommit(async () => {
+              const artworkId = await createArtworkPiece({
+                album: targetAlbum!,
+                owner: user,
+                title: item.title.trim() || cleanTitleFromFilename(item.file.name),
+                description,
+                medium,
+                dimensions: uploaded.dimensions,
+                year,
+                tags: tagsInput.split(','),
+                imageUrl: uploaded.imageUrl,
+                aspectRatio: uploaded.aspectRatio,
+              });
+              targetAlbum = {
+                ...targetAlbum!,
+                coverUrl: targetAlbum!.coverUrl || uploaded.imageUrl,
+                artCount: targetAlbum!.artCount + 1,
+                artworkIds: [...targetAlbum!.artworkIds, artworkId],
+              };
+            });
+
+            successCount += 1;
+            if (isMountedRef.current) {
+              setQueue((prev) =>
+                prev.map((q) => (q.key === item.key ? { ...q, status: 'done' } : q)),
+              );
+            }
+          } catch (itemErr) {
+            failureCount += 1;
+            if (isMountedRef.current) {
+              setQueue((prev) =>
+                prev.map((q) =>
+                  q.key === item.key
+                    ? {
+                        ...q,
+                        status: 'error',
+                        errorMsg:
+                          itemErr instanceof Error ? itemErr.message : 'Upload failed',
+                      }
+                    : q,
+                ),
+              );
+            }
+          } finally {
+            completedCount += 1;
+            if (isMountedRef.current) {
+              setProgress({ current: completedCount, total: uploadableItems.length });
+            }
+          }
         }
-      }
+      };
+
+      await Promise.all(Array.from({ length: workerCount }, () => runWorker()));
 
       if (failureCount === 0) {
         showToast(
           successCount === 1
-            ? `Published "${readyItems[0].title.trim()}" to ${targetAlbum.title}.`
+            ? `Published "${uploadableItems[0].title.trim()}" to ${targetAlbum.title}.`
             : `Published ${successCount} artworks to ${targetAlbum.title}.`,
         );
         onUploaded(targetAlbum.id);
@@ -655,7 +708,7 @@ export function UploadArtworkModal({
             >
               {availableAlbums.map((alb) => (
                 <option key={alb.id} value={alb.id}>
-                  {alb.title} ({alb.visibility} · {alb.artCount}/100)
+                  {alb.title} ({alb.visibility} · {alb.artCount}/{FIELD_LIMITS.ALBUM_MAX_ARTWORKS})
                 </option>
               ))}
               <option value="__new__">+ Create a New Custom Album</option>
@@ -765,12 +818,25 @@ export function UploadArtworkModal({
             />
           </div>
 
+          {uploading && progress.total > 0 && (
+            <div className="space-y-1.5">
+              <div className="h-1.5 w-full overflow-hidden rounded-full bg-zinc-800">
+                <div
+                  className="h-full bg-[#E5B84B] transition-all duration-300"
+                  style={{
+                    width: `${Math.round((progress.current / progress.total) * 100)}%`,
+                  }}
+                />
+              </div>
+            </div>
+          )}
+
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-t border-zinc-800/80 pt-4">
             <span className="text-[11px] text-zinc-500">
-              {convertingCount > 0
-                ? `Converting ${convertingCount} HEIC file(s) to high-resolution JPEG...`
-                : uploading
-                  ? `Uploading ${progress.current} of ${progress.total} to Cloud Firestore...`
+              {uploading
+                ? `Optimizing & uploading ${progress.current} of ${progress.total} in parallel...`
+                : convertingCount > 0
+                  ? `Converting ${convertingCount} HEIC preview(s) — you can click Publish anytime.`
                   : 'Non-owners cannot download your uploaded images.'}
             </span>
             <div className="flex items-center justify-end gap-3">
@@ -784,22 +850,20 @@ export function UploadArtworkModal({
               </button>
               <button
                 type="submit"
-                disabled={uploading || convertingCount > 0 || readyItems.length === 0}
+                disabled={uploading || uploadableItems.length === 0}
                 className="inline-flex items-center gap-2 rounded-lg bg-[#E5B84B] px-5 py-2 text-xs font-semibold text-[#050505] hover:bg-[#f0c761] disabled:opacity-50"
               >
-                {uploading || convertingCount > 0 ? (
+                {uploading ? (
                   <Loader2 className="h-3.5 w-3.5 animate-spin" />
                 ) : (
                   <Upload className="h-3.5 w-3.5" />
                 )}
                 <span>
-                  {convertingCount > 0
-                    ? `Converting (${convertingCount})...`
-                    : uploading
-                      ? `Publishing ${progress.current}/${progress.total}...`
-                      : readyItems.length > 1
-                        ? `Publish ${readyItems.length} Pieces`
-                        : 'Publish Piece'}
+                  {uploading
+                    ? `Publishing ${progress.current}/${progress.total}...`
+                    : uploadableItems.length > 1
+                      ? `Publish ${uploadableItems.length} Pieces`
+                      : 'Publish Piece'}
                 </span>
               </button>
             </div>
