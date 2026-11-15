@@ -322,6 +322,16 @@ export async function updateAlbumDetails(params: {
         updatedAt: serverTimestamp(),
       });
     }
+    const artworks = await fetchArtworksByIds(album.artworkIds);
+    for (const art of artworks) {
+      if (art.imageUrl.startsWith('cloud://media/')) {
+        const mediaId = art.imageUrl.replace('cloud://media/', '');
+        batch.update(doc(db, 'media', mediaId), {
+          visibility,
+          updatedAt: serverTimestamp(),
+        });
+      }
+    }
   }
 
   batch.update(albumRef, albumPayload);
@@ -333,8 +343,27 @@ export async function updateAlbumDetails(params: {
   }
 }
 
+async function deleteCloudMediaRecord(imageUrl: string): Promise<void> {
+  if (!imageUrl.startsWith('cloud://media/')) return;
+  const mediaId = imageUrl.replace('cloud://media/', '');
+  try {
+    const mediaSnap = await getDoc(doc(db, 'media', mediaId));
+    if (!mediaSnap.exists()) return;
+    const chunkCount = (mediaSnap.data().chunkCount as number) || 0;
+    const batch = writeBatch(db);
+    for (let i = 0; i < chunkCount; i++) {
+      batch.delete(doc(db, 'media', mediaId, 'chunks', `chunk_${i}`));
+    }
+    batch.delete(doc(db, 'media', mediaId));
+    await batch.commit();
+  } catch (err) {
+    console.warn('Cloud media cleanup skipped:', err);
+  }
+}
+
 export async function deleteAlbumWithArtworks(album: Album): Promise<void> {
   const path = `albums/${album.id}`;
+  const artworks = await fetchArtworksByIds(album.artworkIds);
   const batch = writeBatch(db);
   for (const artId of album.artworkIds) {
     batch.delete(doc(db, 'artworks', artId));
@@ -343,6 +372,7 @@ export async function deleteAlbumWithArtworks(album: Album): Promise<void> {
 
   try {
     await batch.commit();
+    await Promise.all(artworks.map((a) => deleteCloudMediaRecord(a.imageUrl)));
   } catch (err) {
     handleFirestoreError(err, OperationType.DELETE, path);
   }
@@ -433,45 +463,252 @@ export async function readImageDimensions(dataUrl: string): Promise<{
   });
 }
 
+const CLOUD_CHUNK_CHARS = 600000;
+const MAX_CLOUD_BASE64_CHARS = CLOUD_CHUNK_CHARS * 35; // ~15.7 MB raw base64 cap
+
+interface CachedCloudMedia {
+  objectUrl: string;
+  mimeType: string;
+  fileName: string;
+  blob: Blob;
+}
+
+const cloudMediaCache = new Map<string, CachedCloudMedia>();
+const inFlightCloudMedia = new Map<string, Promise<CachedCloudMedia>>();
+
+async function optimizeLargeImageIfNeeded(
+  dataUrl: string,
+  mimeType: string,
+): Promise<{ dataUrl: string; mimeType: string }> {
+  const commaIdx = dataUrl.indexOf(',');
+  const base64Part = commaIdx >= 0 ? dataUrl.slice(commaIdx + 1) : dataUrl;
+  if (base64Part.length <= MAX_CLOUD_BASE64_CHARS && /^image\/(jpeg|jpg|png|webp|avif|gif)$/i.test(mimeType)) {
+    return { dataUrl, mimeType };
+  }
+
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      const maxEdge = 3840;
+      let targetW = img.naturalWidth || 2400;
+      let targetH = img.naturalHeight || 1800;
+      if (targetW > maxEdge || targetH > maxEdge) {
+        if (targetW >= targetH) {
+          targetH = Math.round((targetH * maxEdge) / targetW);
+          targetW = maxEdge;
+        } else {
+          targetW = Math.round((targetW * maxEdge) / targetH);
+          targetH = maxEdge;
+        }
+      }
+      const canvas = document.createElement('canvas');
+      canvas.width = targetW;
+      canvas.height = targetH;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) {
+        reject(new Error('Could not initialize image canvas processor.'));
+        return;
+      }
+      ctx.drawImage(img, 0, 0, targetW, targetH);
+      const outMime = 'image/jpeg';
+      const outDataUrl = canvas.toDataURL(outMime, 0.92);
+      resolve({ dataUrl: outDataUrl, mimeType: outMime });
+    };
+    img.onerror = () => reject(new Error('Could not process the selected image file.'));
+    img.src = dataUrl;
+  });
+}
+
 export async function uploadMediaFile(
   file: File,
+  album: Album,
   ownerId: string,
 ): Promise<{
   imageUrl: string;
   dimensions: string;
   aspectRatio: AspectRatioOption;
 }> {
-  const dataUrl = await new Promise<string>((resolve, reject) => {
+  const rawDataUrl = await new Promise<string>((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => resolve(String(reader.result));
     reader.onerror = () => reject(new Error('Could not read the selected image file.'));
     reader.readAsDataURL(file);
   });
 
-  const { width, height, aspectRatio } = await readImageDimensions(dataUrl);
+  const { width, height, aspectRatio } = await readImageDimensions(rawDataUrl);
   const dimensions = width && height ? `${width} × ${height} px` : '';
 
-  const response = await fetch('/api/media/upload', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      dataUrl,
-      fileName: file.name,
-      ownerId,
-    }),
-  });
-
-  if (!response.ok) {
-    const payload = (await response.json().catch(() => ({}))) as { error?: string };
-    throw new Error(payload.error || 'Failed to upload image to cloud media storage.');
+  const initialMime = file.type || 'image/jpeg';
+  const processed = await optimizeLargeImageIfNeeded(rawDataUrl, initialMime);
+  const match = /^data:(image\/[a-zA-Z0-9+.-]+);base64,([A-Za-z0-9+/=]+)$/.exec(processed.dataUrl);
+  if (!match) {
+    throw new Error('Invalid image encoding.');
   }
 
-  const result = (await response.json()) as { imageUrl: string };
+  const mimeType = match[1].toLowerCase().slice(0, 64);
+  const base64Body = match[2];
+  if (base64Body.length > MAX_CLOUD_BASE64_CHARS) {
+    throw new Error('Image exceeds maximum cloud gallery upload size (15 MB).');
+  }
+
+  const chunks: string[] = [];
+  for (let i = 0; i < base64Body.length; i += CLOUD_CHUNK_CHARS) {
+    chunks.push(base64Body.slice(i, i + CLOUD_CHUNK_CHARS));
+  }
+
+  const mediaId = generateSafeId('med');
+  const approxBytes = Math.min(15000000, Math.max(1, Math.floor((base64Body.length * 3) / 4)));
+
+  try {
+    await setDoc(doc(db, 'media', mediaId), {
+      id: mediaId,
+      ownerId,
+      albumId: album.id,
+      visibility: album.visibility,
+      mimeType,
+      fileName: (file.name || `${mediaId}.jpg`).slice(0, 160),
+      chunkCount: chunks.length,
+      sizeBytes: approxBytes,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+
+    for (let start = 0; start < chunks.length; start += 8) {
+      const batch = writeBatch(db);
+      const slice = chunks.slice(start, start + 8);
+      slice.forEach((chunkData, offset) => {
+        const index = start + offset;
+        batch.set(doc(db, 'media', mediaId, 'chunks', `chunk_${index}`), {
+          index,
+          ownerId,
+          data: chunkData,
+        });
+      });
+      await batch.commit();
+    }
+  } catch (err) {
+    handleFirestoreError(err, OperationType.WRITE, `media/${mediaId}`);
+  }
+
+  // Pre-seed in-memory cache so the newly uploaded artwork renders instantaneously
+  const byteString = atob(base64Body);
+  const bytes = new Uint8Array(byteString.length);
+  for (let i = 0; i < byteString.length; i++) {
+    bytes[i] = byteString.charCodeAt(i);
+  }
+  const blob = new Blob([bytes], { type: mimeType });
+  const objectUrl = URL.createObjectURL(blob);
+  cloudMediaCache.set(mediaId, {
+    objectUrl,
+    mimeType,
+    fileName: file.name || `${mediaId}.jpg`,
+    blob,
+  });
+
   return {
-    imageUrl: result.imageUrl,
+    imageUrl: `cloud://media/${mediaId}`,
     dimensions,
     aspectRatio,
   };
+}
+
+export async function resolveCloudMedia(imageUrl: string): Promise<CachedCloudMedia | null> {
+  if (!imageUrl.startsWith('cloud://media/')) return null;
+  const mediaId = imageUrl.replace('cloud://media/', '');
+  const cached = cloudMediaCache.get(mediaId);
+  if (cached) return cached;
+
+  const existingPromise = inFlightCloudMedia.get(mediaId);
+  if (existingPromise) return existingPromise;
+
+  const loader = (async () => {
+    const mediaPath = `media/${mediaId}`;
+    let mediaSnap;
+    try {
+      mediaSnap = await getDoc(doc(db, 'media', mediaId));
+    } catch (err) {
+      handleFirestoreError(err, OperationType.GET, mediaPath);
+    }
+    if (!mediaSnap.exists()) {
+      throw new Error('Cloud media asset not found.');
+    }
+
+    const meta = mediaSnap.data() as {
+      chunkCount: number;
+      mimeType: string;
+      fileName: string;
+    };
+
+    const chunkSnaps = await Promise.all(
+      Array.from({ length: meta.chunkCount }, async (_, index) => {
+        const chunkPath = `media/${mediaId}/chunks/chunk_${index}`;
+        try {
+          return await getDoc(doc(db, 'media', mediaId, 'chunks', `chunk_${index}`));
+        } catch (err) {
+          handleFirestoreError(err, OperationType.GET, chunkPath);
+        }
+      }),
+    );
+
+    const base64Full = chunkSnaps
+      .map((snap) => (snap.exists() ? (snap.data().data as string) : ''))
+      .join('');
+
+    if (!base64Full) {
+      throw new Error('Cloud media chunks missing.');
+    }
+
+    const binaryStr = atob(base64Full);
+    const bytes = new Uint8Array(binaryStr.length);
+    for (let i = 0; i < binaryStr.length; i++) {
+      bytes[i] = binaryStr.charCodeAt(i);
+    }
+    const blob = new Blob([bytes], { type: meta.mimeType || 'image/jpeg' });
+    const objectUrl = URL.createObjectURL(blob);
+    const entry: CachedCloudMedia = {
+      objectUrl,
+      mimeType: meta.mimeType || 'image/jpeg',
+      fileName: meta.fileName || `${mediaId}.jpg`,
+      blob,
+    };
+    cloudMediaCache.set(mediaId, entry);
+    return entry;
+  })();
+
+  inFlightCloudMedia.set(mediaId, loader);
+  try {
+    return await loader;
+  } finally {
+    inFlightCloudMedia.delete(mediaId);
+  }
+}
+
+export async function downloadOriginalArtwork(
+  artwork: Artwork,
+  uid: string,
+): Promise<void> {
+  if (artwork.imageUrl.startsWith('cloud://media/')) {
+    const resolved = await resolveCloudMedia(artwork.imageUrl);
+    if (!resolved) throw new Error('Could not resolve artwork file from cloud.');
+    const a = document.createElement('a');
+    a.href = resolved.objectUrl;
+    a.download = resolved.fileName || `${artwork.title.replace(/[^a-zA-Z0-9_-]/g, '_')}.jpg`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    return;
+  }
+
+  if (artwork.imageUrl.startsWith('/api/media/')) {
+    const filename = artwork.imageUrl.replace('/api/media/', '');
+    const downloadUrl = `/api/media/${filename}/download?uid=${encodeURIComponent(uid)}`;
+    const a = document.createElement('a');
+    a.href = downloadUrl;
+    a.download = `${artwork.title.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  }
 }
 
 export async function createArtworkPiece(params: {
@@ -574,6 +811,7 @@ export async function deleteArtworkPiece(artwork: Artwork): Promise<void> {
 
   try {
     await batch.commit();
+    await deleteCloudMediaRecord(artwork.imageUrl);
   } catch (err) {
     handleFirestoreError(err, OperationType.DELETE, path);
   }

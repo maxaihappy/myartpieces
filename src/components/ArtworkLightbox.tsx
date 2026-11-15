@@ -19,6 +19,7 @@ import {
   addArtworkComment,
   deleteArtworkComment,
   deleteArtworkPiece,
+  downloadOriginalArtwork,
   formatRelativeDate,
   hasUserLikedArtwork,
   subscribeArtworkComments,
@@ -239,17 +240,13 @@ export function ArtworkLightbox({
     }
   };
 
-  const handleDownloadOriginal = () => {
+  const handleDownloadOriginal = async () => {
     if (!isOwner || !user) return;
-    if (artwork.imageUrl.startsWith('/api/media/')) {
-      const filename = artwork.imageUrl.replace('/api/media/', '');
-      const downloadUrl = `/api/media/${filename}/download?uid=${encodeURIComponent(user.uid)}`;
-      const a = document.createElement('a');
-      a.href = downloadUrl;
-      a.download = `${artwork.title.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
+    try {
+      await downloadOriginalArtwork(artwork, user.uid);
+    } catch (err) {
+      console.error(err);
+      showToast('Could not download original artwork.');
     }
   };
 
@@ -501,7 +498,9 @@ export function ArtworkLightbox({
                   Open Album
                 </button>
 
-                {isOwner && artwork.imageUrl.startsWith('/api/media/') && (
+                {isOwner &&
+                  (artwork.imageUrl.startsWith('cloud://media/') ||
+                    artwork.imageUrl.startsWith('/api/media/')) && (
                   <button
                     type="button"
                     onClick={handleDownloadOriginal}

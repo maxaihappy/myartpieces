@@ -168,6 +168,40 @@ service cloud.firestore {
         && data.updatedAt is timestamp;
     }
 
+    function isValidMediaAsset(data, mediaId) {
+      return data.keys().hasAll([
+          'id', 'ownerId', 'albumId', 'visibility', 'mimeType',
+          'fileName', 'chunkCount', 'sizeBytes', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'ownerId', 'albumId', 'visibility', 'mimeType',
+          'fileName', 'chunkCount', 'sizeBytes', 'createdAt', 'updatedAt'
+        ])
+        && data.id == mediaId
+        && isValidId(data.id)
+        && isValidId(data.ownerId)
+        && isValidId(data.albumId)
+        && isValidVisibility(data.visibility)
+        && isValidString(data.mimeType, 5, 64)
+        && data.mimeType.matches('^image/[a-zA-Z0-9.+\\-]+$')
+        && isValidString(data.fileName, 1, 160)
+        && data.chunkCount is int && data.chunkCount >= 1 && data.chunkCount <= 40
+        && data.sizeBytes is int && data.sizeBytes >= 1 && data.sizeBytes <= 15000000
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidMediaChunk(data, chunkId) {
+      return data.keys().hasAll(['index', 'ownerId', 'data'])
+        && data.keys().hasOnly(['index', 'ownerId', 'data'])
+        && isValidId(chunkId)
+        && data.index is int && data.index >= 0 && data.index < 40
+        && chunkId == 'chunk_' + string(data.index)
+        && data.ownerId == request.auth.uid
+        && isValidId(data.ownerId)
+        && isValidString(data.data, 1, 750000);
+    }
+
     function isValidLike(data, userId) {
       return data.keys().hasAll(['userId', 'userName', 'createdAt'])
         && data.keys().hasOnly(['userId', 'userName', 'createdAt'])
@@ -338,6 +372,54 @@ service cloud.firestore {
         );
 
       allow delete: if isVerifiedUser() && isValidId(albumId) && existing().ownerId == request.auth.uid;
+    }
+
+    match /media/{mediaId} {
+      allow get: if isValidId(mediaId) && (
+        existing().visibility in ['public', 'unlisted']
+        || (isSignedIn() && existing().ownerId == request.auth.uid)
+        || isAlbumInvited(existing().albumId)
+      );
+      allow list: if isSignedIn() && existing().ownerId == request.auth.uid;
+
+      allow create: if isVerifiedUser() && isValidId(mediaId)
+        && isValidMediaAsset(incoming(), mediaId)
+        && incoming().ownerId == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && exists(/databases/$(database)/documents/albums/$(incoming().albumId))
+        && (isAlbumOwner(incoming().albumId) || isAlbumEditor(incoming().albumId))
+        && incoming().visibility == get(/databases/$(database)/documents/albums/$(incoming().albumId)).data.visibility;
+
+      allow update: if isVerifiedUser() && isValidId(mediaId)
+        && isValidMediaAsset(incoming(), mediaId)
+        && incoming().id == existing().id
+        && incoming().ownerId == existing().ownerId
+        && incoming().albumId == existing().albumId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (existing().ownerId == request.auth.uid || isAlbumOwner(existing().albumId))
+        && incoming().diff(existing()).affectedKeys().hasOnly(['visibility', 'updatedAt']);
+
+      allow delete: if isVerifiedUser() && isValidId(mediaId)
+        && (existing().ownerId == request.auth.uid || isAlbumOwner(existing().albumId));
+
+      match /chunks/{chunkId} {
+        allow get: if isValidId(mediaId) && isValidId(chunkId) && (
+          get(/databases/$(database)/documents/media/$(mediaId)).data.visibility in ['public', 'unlisted']
+          || (isSignedIn() && get(/databases/$(database)/documents/media/$(mediaId)).data.ownerId == request.auth.uid)
+          || isAlbumInvited(get(/databases/$(database)/documents/media/$(mediaId)).data.albumId)
+        );
+        allow create: if isVerifiedUser() && isValidId(mediaId) && isValidId(chunkId)
+          && isValidMediaChunk(incoming(), chunkId)
+          && exists(/databases/$(database)/documents/media/$(mediaId))
+          && get(/databases/$(database)/documents/media/$(mediaId)).data.ownerId == request.auth.uid;
+        allow delete: if isVerifiedUser() && isValidId(mediaId) && isValidId(chunkId)
+          && (
+            get(/databases/$(database)/documents/media/$(mediaId)).data.ownerId == request.auth.uid
+            || isAlbumOwner(get(/databases/$(database)/documents/media/$(mediaId)).data.albumId)
+          );
+      }
     }
 
     match /artworks/{artworkId} {

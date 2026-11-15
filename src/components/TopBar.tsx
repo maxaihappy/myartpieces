@@ -87,7 +87,7 @@ export function TopBar({
               className="inline-flex items-center gap-2 rounded-lg bg-[#E5B84B] px-4 py-2 text-xs font-semibold tracking-wide text-[#050505] transition-all duration-150 hover:bg-[#f0c761] active:scale-[0.98] whitespace-nowrap shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#E5B84B] focus-visible:ring-offset-2 focus-visible:ring-offset-[#050505]"
             >
               <Upload className="h-3.5 w-3.5" strokeWidth={2} />
-              <span>Upload Piece</span>
+              <span>Upload</span>
             </button>
           ) : (
             <button

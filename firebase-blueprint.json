@@ -209,7 +209,7 @@
     },
     "Artwork": {
       "title": "Artwork",
-      "description": "Digital artwork piece stored in an album with high-resolution media reference.",
+      "description": "Digital artwork piece stored in an album with cloud media reference.",
       "type": "object",
       "properties": {
         "id": {
@@ -312,6 +312,93 @@
         "createdAt",
         "updatedAt"
       ]
+    },
+    "MediaAsset": {
+      "title": "MediaAsset",
+      "description": "Cloud-persisted artwork image metadata linking to chunked binary data in Firestore.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "albumId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "visibility": {
+          "type": "string",
+          "enum": ["public", "unlisted", "private", "invite"]
+        },
+        "mimeType": {
+          "type": "string",
+          "minLength": 5,
+          "maxLength": 64
+        },
+        "fileName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "chunkCount": {
+          "type": "integer"
+        },
+        "sizeBytes": {
+          "type": "integer"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "ownerId",
+        "albumId",
+        "visibility",
+        "mimeType",
+        "fileName",
+        "chunkCount",
+        "sizeBytes",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "MediaChunk": {
+      "title": "MediaChunk",
+      "description": "Individual base64 slice of a cloud-persisted artwork image (< 700 KB per doc).",
+      "type": "object",
+      "properties": {
+        "index": {
+          "type": "integer"
+        },
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "data": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 750000
+        }
+      },
+      "required": ["index", "ownerId", "data"]
     },
     "ArtworkLike": {
       "title": "ArtworkLike",
@@ -511,6 +598,14 @@
     "/artworks/{artworkId}": {
       "schema": { "$ref": "#/entities/Artwork" },
       "description": "Individual artwork records linked to an album."
+    },
+    "/media/{mediaId}": {
+      "schema": { "$ref": "#/entities/MediaAsset" },
+      "description": "Cloud-persisted artwork image metadata."
+    },
+    "/media/{mediaId}/chunks/{chunkId}": {
+      "schema": { "$ref": "#/entities/MediaChunk" },
+      "description": "Chunked artwork image payloads persisted in Cloud Firestore."
     },
     "/artworks/{artworkId}/likes/{userId}": {
       "schema": { "$ref": "#/entities/ArtworkLike" },
