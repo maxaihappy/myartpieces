@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import {
   CheckCircle2,
   FolderOpen,
+  Image as ImageIcon,
   ImagePlus,
   Loader2,
   Trash2,
@@ -14,6 +15,7 @@ import {
   createArtworkPiece,
   uploadMediaFile,
 } from '../lib/galleryService';
+import { convertHeicToJpeg, isHeicFile } from '../lib/heicConverter';
 import { FIELD_LIMITS, type Album, type AlbumVisibility } from '../types/gallery';
 
 interface UploadArtworkModalProps {
@@ -28,7 +30,7 @@ interface QueuedArtwork {
   file: File;
   previewUrl: string;
   title: string;
-  status: 'queued' | 'uploading' | 'done' | 'error';
+  status: 'converting' | 'queued' | 'uploading' | 'done' | 'error';
   errorMsg?: string;
 }
 
@@ -41,9 +43,10 @@ const MEDIUM_PRESETS = [
   'Mixed Media',
 ];
 
-const IMAGE_EXT_RE = /\.(jpe?g|png|webp|avif|gif)$/i;
+const IMAGE_EXT_RE = /\.(jpe?g|png|webp|avif|gif|heic|heif)$/i;
 
 function isSupportedImageFile(file: File): boolean {
+  if (isHeicFile(file)) return true;
   if (file.type && file.type.startsWith('image/')) {
     return /^image\/(jpeg|jpg|png|webp|avif|gif)$/i.test(file.type) || IMAGE_EXT_RE.test(file.name);
   }
@@ -51,11 +54,13 @@ function isSupportedImageFile(file: File): boolean {
 }
 
 function cleanTitleFromFilename(name: string): string {
-  return name
-    .replace(/\.[^/.]+$/, '')
-    .replace(/[_-]+/g, ' ')
-    .trim()
-    .slice(0, FIELD_LIMITS.ARTWORK_TITLE_MAX) || 'Untitled Piece';
+  return (
+    name
+      .replace(/\.[^/.]+$/, '')
+      .replace(/[_-]+/g, ' ')
+      .trim()
+      .slice(0, FIELD_LIMITS.ARTWORK_TITLE_MAX) || 'Untitled Piece'
+  );
 }
 
 async function readDirectoryAllEntries(
@@ -125,6 +130,7 @@ export function UploadArtworkModal({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
   const queueRef = useRef<QueuedArtwork[]>([]);
+  const activeConversionsRef = useRef<Set<string>>(new Set());
 
   const [queue, setQueue] = useState<QueuedArtwork[]>([]);
   const [isDragActive, setIsDragActive] = useState(false);
@@ -137,7 +143,7 @@ export function UploadArtworkModal({
   const [newAlbumVisibility, setNewAlbumVisibility] = useState<AlbumVisibility>('public');
 
   // Shared batch metadata
-  const [medium, setMedium] = useState('Digital Painting');
+  const [medium, setMedium] = useState('Fine Art Photography');
   const [year, setYear] = useState(String(new Date().getFullYear()));
   const [description, setDescription] = useState('');
   const [tagsInput, setTagsInput] = useState('');
@@ -151,9 +157,60 @@ export function UploadArtworkModal({
 
   useEffect(() => {
     return () => {
-      queueRef.current.forEach((item) => URL.revokeObjectURL(item.previewUrl));
+      queueRef.current.forEach((item) => {
+        if (item.previewUrl) URL.revokeObjectURL(item.previewUrl);
+      });
     };
   }, []);
+
+  // Background HEIC/HEIF -> JPEG conversion worker
+  useEffect(() => {
+    const pendingConversions = queue.filter(
+      (item) => item.status === 'converting' && !activeConversionsRef.current.has(item.key),
+    );
+    if (pendingConversions.length === 0) return;
+
+    let cancelled = false;
+    (async () => {
+      for (const item of pendingConversions) {
+        if (cancelled) break;
+        if (activeConversionsRef.current.has(item.key)) continue;
+        activeConversionsRef.current.add(item.key);
+        try {
+          const convertedFile = await convertHeicToJpeg(item.file);
+          if (cancelled) break;
+          const previewUrl = URL.createObjectURL(convertedFile);
+          setQueue((prev) =>
+            prev.map((q) =>
+              q.key === item.key
+                ? { ...q, file: convertedFile, previewUrl, status: 'queued' }
+                : q,
+            ),
+          );
+        } catch (err) {
+          if (cancelled) break;
+          setQueue((prev) =>
+            prev.map((q) =>
+              q.key === item.key
+                ? {
+                    ...q,
+                    status: 'error',
+                    errorMsg:
+                      err instanceof Error ? err.message : 'HEIC conversion failed',
+                  }
+                : q,
+            ),
+          );
+        } finally {
+          activeConversionsRef.current.delete(item.key);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [queue]);
 
   const addFilesToQueue = (rawFiles: File[], suggestedFolderName = '') => {
     if (rawFiles.length === 0) return;
@@ -178,12 +235,13 @@ export function UploadArtworkModal({
         if (existingKeys.has(key)) continue;
         existingKeys.add(key);
 
+        const needsHeicConversion = isHeicFile(file);
         nextItems.push({
           key,
           file,
-          previewUrl: URL.createObjectURL(file),
+          previewUrl: needsHeicConversion ? '' : URL.createObjectURL(file),
           title: cleanTitleFromFilename(file.name),
-          status: 'queued',
+          status: needsHeicConversion ? 'converting' : 'queued',
         });
       }
 
@@ -203,7 +261,7 @@ export function UploadArtworkModal({
     if (skippedOversized > 0) {
       showToast(`Skipped ${skippedOversized} image(s) larger than 25 MB.`);
     } else if (skippedUnsupported > 0 && rawFiles.length === skippedUnsupported) {
-      showToast('No supported images found (JPEG, PNG, WebP, AVIF, GIF).');
+      showToast('No supported images found (JPEG, PNG, WebP, AVIF, GIF, HEIC).');
     }
   };
 
@@ -237,14 +295,16 @@ export function UploadArtworkModal({
     if (uploading) return;
     setQueue((prev) => {
       const target = prev.find((item) => item.key === key);
-      if (target) URL.revokeObjectURL(target.previewUrl);
+      if (target?.previewUrl) URL.revokeObjectURL(target.previewUrl);
       return prev.filter((item) => item.key !== key);
     });
   };
 
   const handleClearQueue = () => {
     if (uploading) return;
-    queue.forEach((item) => URL.revokeObjectURL(item.previewUrl));
+    queue.forEach((item) => {
+      if (item.previewUrl) URL.revokeObjectURL(item.previewUrl);
+    });
     setQueue([]);
   };
 
@@ -258,7 +318,8 @@ export function UploadArtworkModal({
     );
   };
 
-  const pendingItems = queue.filter((item) => item.status !== 'done');
+  const convertingCount = queue.filter((item) => item.status === 'converting').length;
+  const readyItems = queue.filter((item) => item.status === 'queued' || item.status === 'error');
   const existingAlbum = availableAlbums.find((a) => a.id === selectedAlbumId);
   const remainingSlots =
     selectedAlbumId === '__new__'
@@ -267,9 +328,9 @@ export function UploadArtworkModal({
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!user || pendingItems.length === 0 || uploading) return;
+    if (!user || readyItems.length === 0 || convertingCount > 0 || uploading) return;
 
-    if (pendingItems.length > remainingSlots) {
+    if (readyItems.length > remainingSlots) {
       showToast(
         `This album can hold ${remainingSlots} more piece(s). Create a new album or trim the queue.`,
       );
@@ -277,7 +338,7 @@ export function UploadArtworkModal({
     }
 
     setUploading(true);
-    setProgress({ current: 0, total: pendingItems.length });
+    setProgress({ current: 0, total: readyItems.length });
 
     try {
       let targetAlbum: Album | undefined = existingAlbum;
@@ -309,15 +370,20 @@ export function UploadArtworkModal({
       let successCount = 0;
       let failureCount = 0;
 
-      for (let idx = 0; idx < pendingItems.length; idx++) {
-        const item = pendingItems[idx];
-        setProgress({ current: idx + 1, total: pendingItems.length });
+      for (let idx = 0; idx < readyItems.length; idx++) {
+        const item = readyItems[idx];
+        setProgress({ current: idx + 1, total: readyItems.length });
         setQueue((prev) =>
-          prev.map((q) => (q.key === item.key ? { ...q, status: 'uploading', errorMsg: undefined } : q)),
+          prev.map((q) =>
+            q.key === item.key ? { ...q, status: 'uploading', errorMsg: undefined } : q,
+          ),
         );
 
         try {
-          const uploaded = await uploadMediaFile(item.file, targetAlbum, user.uid);
+          const uploadReadyFile = isHeicFile(item.file)
+            ? await convertHeicToJpeg(item.file)
+            : item.file;
+          const uploaded = await uploadMediaFile(uploadReadyFile, targetAlbum, user.uid);
           const artworkId = await createArtworkPiece({
             album: targetAlbum,
             owner: user,
@@ -331,7 +397,6 @@ export function UploadArtworkModal({
             aspectRatio: uploaded.aspectRatio,
           });
 
-          // Keep running album state synchronized for subsequent pieces in batch
           targetAlbum = {
             ...targetAlbum,
             coverUrl: targetAlbum.coverUrl || uploaded.imageUrl,
@@ -363,7 +428,7 @@ export function UploadArtworkModal({
       if (failureCount === 0) {
         showToast(
           successCount === 1
-            ? `Published "${pendingItems[0].title.trim()}" to ${targetAlbum.title}.`
+            ? `Published "${readyItems[0].title.trim()}" to ${targetAlbum.title}.`
             : `Published ${successCount} artworks to ${targetAlbum.title}.`,
         );
         onUploaded(targetAlbum.id);
@@ -395,7 +460,7 @@ export function UploadArtworkModal({
               Upload Artpieces
             </h2>
             <p className="mt-0.5 text-xs text-zinc-400">
-              Select multiple photos, pick a folder, or drag &amp; drop files and folders from any device.
+              Select photos, pick a folder, or drop files—including Apple HEIC/HEIF photos, automatically converted for universal viewing.
             </p>
           </div>
           <button
@@ -414,7 +479,7 @@ export function UploadArtworkModal({
           <input
             ref={fileInputRef}
             type="file"
-            accept="image/*"
+            accept="image/*,.heic,.heif"
             multiple
             onChange={(e) => {
               handleInputFiles(e.target.files, false);
@@ -425,7 +490,7 @@ export function UploadArtworkModal({
           <input
             ref={folderInputRef}
             type="file"
-            accept="image/*"
+            accept="image/*,.heic,.heif"
             multiple
             {...({ webkitdirectory: '', directory: '' } as Record<string, string>)}
             onChange={(e) => {
@@ -454,7 +519,7 @@ export function UploadArtworkModal({
               Drop multiple photos or entire folders here
             </p>
             <p className="mt-1 text-xs text-zinc-500">
-              JPEG, PNG, WebP, AVIF, GIF up to 25 MB each · Persisted in Cloud Firestore
+              Supports JPEG, PNG, WebP, AVIF, GIF, and Apple HEIC / HEIF up to 25 MB each
             </p>
 
             <div className="mt-4 flex flex-wrap items-center justify-center gap-3">
@@ -504,11 +569,22 @@ export function UploadArtworkModal({
                     key={item.key}
                     className="flex items-center gap-3.5 p-3"
                   >
-                    <img
-                      src={item.previewUrl}
-                      alt={item.title}
-                      className="h-12 w-12 rounded-md border border-zinc-800 object-cover shrink-0"
-                    />
+                    {item.previewUrl ? (
+                      <img
+                        src={item.previewUrl}
+                        alt={item.title}
+                        className="h-12 w-12 rounded-md border border-zinc-800 object-cover shrink-0"
+                      />
+                    ) : (
+                      <div className="flex h-12 w-12 items-center justify-center rounded-md border border-zinc-800 bg-zinc-900 text-zinc-500 shrink-0">
+                        {item.status === 'converting' ? (
+                          <Loader2 className="h-4 w-4 animate-spin text-[#E5B84B]" />
+                        ) : (
+                          <ImageIcon className="h-4 w-4" />
+                        )}
+                      </div>
+                    )}
+
                     <div className="min-w-0 flex-1">
                       <input
                         type="text"
@@ -520,6 +596,11 @@ export function UploadArtworkModal({
                       />
                       <div className="mt-0.5 flex items-center gap-2 px-1.5 text-[11px] text-zinc-500 tabular-nums">
                         <span>{formatFileSize(item.file.size)}</span>
+                        {item.status === 'converting' && (
+                          <span className="inline-flex items-center gap-1 text-[#E5B84B]">
+                            Converting HEIC to high-res JPEG...
+                          </span>
+                        )}
                         {item.status === 'uploading' && (
                           <span className="inline-flex items-center gap-1 text-[#E5B84B]">
                             <Loader2 className="h-3 w-3 animate-spin" />
@@ -686,9 +767,11 @@ export function UploadArtworkModal({
 
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-t border-zinc-800/80 pt-4">
             <span className="text-[11px] text-zinc-500">
-              {uploading
-                ? `Uploading ${progress.current} of ${progress.total} to Cloud Firestore...`
-                : 'Non-owners cannot download your uploaded images.'}
+              {convertingCount > 0
+                ? `Converting ${convertingCount} HEIC file(s) to high-resolution JPEG...`
+                : uploading
+                  ? `Uploading ${progress.current} of ${progress.total} to Cloud Firestore...`
+                  : 'Non-owners cannot download your uploaded images.'}
             </span>
             <div className="flex items-center justify-end gap-3">
               <button
@@ -701,20 +784,22 @@ export function UploadArtworkModal({
               </button>
               <button
                 type="submit"
-                disabled={uploading || pendingItems.length === 0}
+                disabled={uploading || convertingCount > 0 || readyItems.length === 0}
                 className="inline-flex items-center gap-2 rounded-lg bg-[#E5B84B] px-5 py-2 text-xs font-semibold text-[#050505] hover:bg-[#f0c761] disabled:opacity-50"
               >
-                {uploading ? (
+                {uploading || convertingCount > 0 ? (
                   <Loader2 className="h-3.5 w-3.5 animate-spin" />
                 ) : (
                   <Upload className="h-3.5 w-3.5" />
                 )}
                 <span>
-                  {uploading
-                    ? `Publishing ${progress.current}/${progress.total}...`
-                    : pendingItems.length > 1
-                      ? `Publish ${pendingItems.length} Pieces`
-                      : 'Publish Piece'}
+                  {convertingCount > 0
+                    ? `Converting (${convertingCount})...`
+                    : uploading
+                      ? `Publishing ${progress.current}/${progress.total}...`
+                      : readyItems.length > 1
+                        ? `Publish ${readyItems.length} Pieces`
+                        : 'Publish Piece'}
                 </span>
               </button>
             </div>
